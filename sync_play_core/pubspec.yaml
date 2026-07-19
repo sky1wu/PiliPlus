@@ -1,0 +1,16 @@
+name: sync_play_core
+description: >-
+  Pure Dart core for the Bili-SyncPlay protocol: message models and guards,
+  Bilibili URL normalization, and NTP-style clock sync. Mirrors
+  packages/protocol and the extension clock logic of the Bili-SyncPlay repo
+  (protocol v3). Keep this package free of Flutter imports so it stays
+  analyzable and testable on low-memory dev machines.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.12.0"
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0
