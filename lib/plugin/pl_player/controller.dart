@@ -135,6 +135,9 @@ class PlPlayerController with BlockConfigMixin {
   int? _aid;
   String? _bvid;
   int? cid;
+
+  String? get bvid => _bvid;
+  VideoType get videoType => _videoType;
   int? _epid;
   int? _seasonId;
   int? _pgcType;
@@ -661,6 +664,7 @@ class PlPlayerController with BlockConfigMixin {
 
       await _initializePlayer();
       onInit?.call();
+      _notifySyncPlayDataSource();
     } catch (err, stackTrace) {
       dataStatus.value = DataStatus.error;
       if (kDebugMode) {
@@ -1068,6 +1072,9 @@ class PlPlayerController with BlockConfigMixin {
       position = Duration.zero;
     }
     _heartDuration = position.inSeconds;
+    for (final listener in Set.of(syncPlaySeekListeners)) {
+      listener(this, position);
+    }
 
     Future<void> seek() async {
       if (isSeek) {
@@ -1284,6 +1291,10 @@ class PlPlayerController with BlockConfigMixin {
 
   // 双击播放、暂停
   Future<void> onDoubleTapCenter() async {
+    // 播放/暂停按钮与双击手势的统一入口:先通知同步钩子这是用户手势
+    for (final listener in Set.of(syncPlayUserToggleListeners)) {
+      listener(this);
+    }
     if (!isLive && isCompleted) {
       await videoPlayerController!.seek(Duration.zero);
       videoPlayerController!.play();
@@ -1431,6 +1442,22 @@ class PlPlayerController with BlockConfigMixin {
     } finally {
       _setFullScreen(status);
       _fsProcessing = false;
+    }
+  }
+
+  // ---- Bili-SyncPlay 同步钩子(lib/sync_play 注册) ----
+  // 静态集合:播放器实例随页面销毁重建,静态注册可跨实例存活;
+  // 实例级的 position/status 监听由 dataSource 回调里重新挂载。
+  static final Set<void Function(PlPlayerController player)>
+  syncPlayDataSourceListeners = {};
+  static final Set<void Function(PlPlayerController player, Duration position)>
+  syncPlaySeekListeners = {};
+  static final Set<void Function(PlPlayerController player)>
+  syncPlayUserToggleListeners = {};
+
+  void _notifySyncPlayDataSource() {
+    for (final listener in Set.of(syncPlayDataSourceListeners)) {
+      listener(this);
     }
   }
 

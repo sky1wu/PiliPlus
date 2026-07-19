@@ -50,6 +50,8 @@ import 'package:PiliPlus/plugin/pl_player/widgets/common_btn.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/forward_seek.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/mpv_convert_webp.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/play_pause_btn.dart';
+import 'package:PiliPlus/sync_play/sync_play_service.dart';
+import 'package:PiliPlus/sync_play/ui/room_panel.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
@@ -441,6 +443,24 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
             SmartDialog.showToast('已经是最后一集了');
           }
         },
+      ),
+
+      /// 一起看(Bili-SyncPlay)
+      BottomControlType.syncPlay => ComBtn(
+        width: widgetWidth,
+        height: 30,
+        tooltip: '一起看',
+        icon: ListenableBuilder(
+          listenable: SyncPlayService.to,
+          builder: (context, _) => Icon(
+            SyncPlayService.to.inRoom ? Icons.groups : Icons.groups_outlined,
+            size: 19,
+            color: SyncPlayService.to.inRoom
+                ? colorScheme.primary
+                : Colors.white,
+          ),
+        ),
+        onTap: () => SyncPlayRoomPanel.show(context),
       ),
 
       /// 时间进度
@@ -912,6 +932,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       .subtitle,
       .speed,
       if (isNotFileSource && flag) .qa,
+      if (isNotFileSource && !plPlayerController.isLive) .syncPlay,
       if (!plPlayerController.isDesktopPip) .fullscreen,
     ];
     return PlayerBar(
