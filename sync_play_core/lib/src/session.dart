@@ -14,6 +14,7 @@ import 'client_messages.dart';
 import 'clock_sync.dart';
 import 'common.dart';
 import 'models.dart';
+import 'player_sync.dart' show PlayerSyncSessionApi;
 import 'server_messages.dart';
 import 'transport.dart';
 
@@ -63,7 +64,7 @@ Uri? validateServerUrl(String url) {
 
 typedef _MemberDelta = ({bool joined, String roomCode, RoomMember member});
 
-class SyncPlayRoomSession {
+class SyncPlayRoomSession implements PlayerSyncSessionApi {
   SyncPlayRoomSession({
     required this.serverUrl,
     SyncPlayTransportConnector? connector,
@@ -109,11 +110,14 @@ class SyncPlayRoomSession {
   DateTime? _reconnectDeadline;
 
   // ---- 会话状态(runtime-state.ts: RoomSessionState) ----
+  @override
   String? roomCode;
   String? joinToken;
   String? memberToken;
+  @override
   String? memberId;
   String? displayName;
+  @override
   RoomState? roomState;
   bool pendingCreateRoom = false;
   String? pendingJoinRoomCode;
@@ -122,6 +126,7 @@ class SyncPlayRoomSession {
 
   /// 已连接但本会话的权威 room:state 尚未到达(见 runtime-state.ts 同名注释):
   /// 此窗口内缓存的 roomState/memberToken 可能过期,自动分享类动作应推迟。
+  @override
   bool awaitingFreshRoomState = false;
 
   // ---- 时钟(runtime-state.ts: ClockState) ----
@@ -776,6 +781,7 @@ class SyncPlayRoomSession {
     _notify();
   }
 
+  @override
   void shareVideo(SharedVideo video, {PlaybackState? playback}) {
     final token = memberToken;
     if (!connected || token == null) {
@@ -790,6 +796,7 @@ class SyncPlayRoomSession {
     );
   }
 
+  @override
   void sendPlaybackUpdate(PlaybackState playback) {
     final token = memberToken;
     if (!connected || token == null) {
