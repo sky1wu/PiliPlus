@@ -13,6 +13,10 @@ analyzer:
   exclude:
     - lib/grpc/bilibili/**
     # - lib/common/widgets/flutter/**
+    # sync_play_core 是独立包,有自己的分析上下文与 dev 依赖(fake_async 等),
+    # 质量由包内 `dart analyze` + `dart test` 把关;根上下文分析它会因
+    # dev 依赖未在 app 侧解析而误报。
+    - sync_play_core/**
 
 formatter:
   trailing_commas: preserve
