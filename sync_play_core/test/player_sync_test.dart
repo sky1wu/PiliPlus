@@ -589,6 +589,132 @@ void main() {
       },
     );
 
+    test('videoIdsMayReferToSameVideo tolerates unknown cid/page', () {
+      expect(
+        videoIdsMayReferToSameVideo('BV1xx411c7mD:42', 'BV1xx411c7mD'),
+        isTrue,
+      );
+      expect(
+        videoIdsMayReferToSameVideo('BV1xx411c7mD:42', 'BV1xx411c7mD:p2'),
+        isTrue, // cid 与分P无法互证不同
+      );
+      expect(
+        videoIdsMayReferToSameVideo('BV1xx411c7mD:42', 'BV1xx411c7mD:43'),
+        isFalse,
+      );
+      expect(
+        videoIdsMayReferToSameVideo('BV1xx411c7mD:p2', 'BV1xx411c7mD:p3'),
+        isFalse,
+      );
+      expect(
+        videoIdsMayReferToSameVideo('BV1xx411c7mD', 'BV1ab411c7mD'),
+        isFalse,
+      );
+    });
+
+    test('repeated room states trigger navigation only once', () async {
+      // 回归:每条 room:state 都 push 视频页导致页面堆叠卡死
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD');
+      final state = roomState(playback: playback());
+      harness.session.roomState = state;
+
+      await harness.engine.applyRoomState(state);
+      await harness.engine.applyRoomState(state);
+      await harness.engine.applyRoomState(state);
+      expect(
+        harness.port.calls.where((call) => call.startsWith('openVideo')),
+        hasLength(1),
+      );
+    });
+
+    test('adopts the shared identity when the target video loads', () async {
+      // 回归:共享 URL 不带 cid、本地身份带 cid,严格比对导致反复导航
+      final harness = EngineHarness();
+      final shared = RoomState(
+        roomCode: 'ABC123',
+        sharedVideo: const SharedVideo(
+          videoId: 'BV1xx411c7mD',
+          url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+          title: 'Video',
+          sharedByMemberId: 'member-2',
+        ),
+        playback: playback(
+          url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+          currentTime: 30,
+        ),
+        members: const [RoomMember(id: 'member-1', name: 'Alice')],
+      );
+      harness.session.roomState = shared;
+      await harness.engine.applyRoomState(shared);
+      expect(harness.port.calls.single, startsWith('openVideo'));
+      harness.port.calls.clear();
+
+      // 目标页加载:本地以 bvid+cid 构造,身份应采纳为房间形态
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      expect(harness.engine.currentVideo!.videoId, 'BV1xx411c7mD');
+      expect(
+        harness.engine.currentVideo!.normalizedUrl,
+        'https://www.bilibili.com/video/BV1xx411c7mD',
+      );
+
+      // 再来 room:state:不再导航,正常施加播放状态
+      harness.engine.lastKnownPositionSeconds = 0;
+      harness.engine.lastKnownRate = 1;
+      await harness.engine.applyRoomState(shared);
+      expect(harness.port.calls, ['seekTo:30.0', 'play']);
+
+      // 广播使用房间的共享 URL(其他端才认得)
+      harness.now += programmaticApplyWindowMs + 100;
+      harness.engine.onLocalSeek(harness.snapshot(position: 50));
+      expect(
+        harness.session.playbackUpdates.single.url,
+        'https://www.bilibili.com/video/BV1xx411c7mD',
+      );
+    });
+
+    test('adopts identity late when video loaded before joining', () async {
+      final harness = EngineHarness();
+      // 先加载视频(未进房时无共享状态可采纳)
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      expect(harness.engine.currentVideo!.videoId, 'BV1xx411c7mD:42');
+
+      // 进房后收到同一视频的共享(无 cid 形态):补采纳,不导航
+      final shared = RoomState(
+        roomCode: 'ABC123',
+        sharedVideo: const SharedVideo(
+          videoId: 'BV1xx411c7mD',
+          url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+          title: 'Video',
+        ),
+        playback: playback(
+          url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+          currentTime: 30,
+        ),
+        members: const [RoomMember(id: 'member-1', name: 'Alice')],
+      );
+      harness.session.roomState = shared;
+      harness.engine.lastKnownPositionSeconds = 0;
+      harness.engine.lastKnownRate = 1;
+      await harness.engine.applyRoomState(shared);
+      expect(harness.engine.currentVideo!.videoId, 'BV1xx411c7mD');
+      expect(harness.port.calls, ['seekTo:30.0', 'play']);
+    });
+
+    test('resetRoomLocalState allows navigating again after rejoin', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD');
+      final state = roomState(playback: playback());
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.engine.resetRoomLocalState();
+      await harness.engine.applyRoomState(state);
+      expect(
+        harness.port.calls.where((call) => call.startsWith('openVideo')),
+        hasLength(2),
+      );
+    });
+
     test(
       'manual shareCurrentVideo sends video with playback snapshot',
       () async {

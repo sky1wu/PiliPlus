@@ -342,6 +342,47 @@ bool shouldTreatAsExplicitSeek({
     playState == PlaybackPlayState.playing &&
     syncIntent == PlaybackSyncIntent.explicitSeek;
 
+// ------------------------------------------------------------ 视频身份
+
+typedef _VideoIdParts = ({String base, int? cid, int? page});
+
+_VideoIdParts _parseVideoId(String videoId) {
+  final parts = videoId.split(':');
+  final suffix = parts.length > 1 ? parts[1] : null;
+  int? cid;
+  int? page;
+  if (suffix != null) {
+    if (suffix.startsWith('p')) {
+      page = int.tryParse(suffix.substring(1));
+    } else {
+      cid = int.tryParse(suffix);
+    }
+  }
+  return (base: parts.first, cid: cid, page: page);
+}
+
+/// 两个协议 videoId(`BVxx[:cid|:pN]` 等)是否可能指向同一视频。
+///
+/// 浏览器扩展的"当前视频身份"取自地址栏,导航到共享 URL 后与房间身份
+/// 逐字相等;移动端身份由 bvid/cid 构造,与共享 URL 的形态(带不带
+/// cid/分P)可能不同。比对必须宽容:同 bvid 且无法确认 cid/分P 不同时
+/// 一律视为同一视频,否则会反复导航(video-identity.ts:
+/// isConfirmedDifferentSharedVideo 的"confirmed"语义)。
+bool videoIdsMayReferToSameVideo(String a, String b) {
+  final pa = _parseVideoId(a);
+  final pb = _parseVideoId(b);
+  if (pa.base != pb.base) {
+    return false;
+  }
+  if (pa.cid != null && pb.cid != null && pa.cid != pb.cid) {
+    return false;
+  }
+  if (pa.page != null && pb.page != null && pa.page != pb.page) {
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------- 引擎
 
 /// 引擎对会话层的窄依赖(SyncPlayRoomSession 实现它)。
@@ -410,6 +451,10 @@ class PlayerSyncEngine {
   /// 用户明确选择在房间内播放的非共享视频 URL(不预授权,见 PR #140)。
   String? explicitNonSharedPlaybackUrl;
 
+  /// 防重导航守卫(share-controller 的 lastOpenedSharedUrl 语义):
+  /// 已为该共享 URL 发起过导航就不再重复,等目标页 onVideoLoaded。
+  String? _lastOpenedSharedUrl;
+
   /// 桥接层随位置回调持续写入的本地播放快照(施加时的对齐基准)。
   double? lastKnownPositionSeconds;
   double? lastKnownRate;
@@ -435,8 +480,24 @@ class PlayerSyncEngine {
       _log('onVideoLoaded: unsupported video id $bvid');
       return;
     }
-    currentVideo = ref;
-    currentTitle = title;
+    // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
+    // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
+    final shared = session.roomState?.sharedVideo;
+    final normalizedShared = shared == null
+        ? null
+        : normalizeBilibiliUrl(shared.url);
+    if (shared != null &&
+        normalizedShared != null &&
+        videoIdsMayReferToSameVideo(ref.videoId, shared.videoId)) {
+      currentVideo = BilibiliVideoRef(
+        videoId: shared.videoId,
+        normalizedUrl: normalizedShared,
+      );
+      currentTitle = title ?? shared.title;
+    } else {
+      currentVideo = ref;
+      currentTitle = title;
+    }
     if (session.roomCode != null) {
       pendingRoomStateHydration = true;
       _maybeAutoShareAsSharer();
@@ -622,24 +683,43 @@ class PlayerSyncEngine {
         ? null
         : normalizeBilibiliUrl(sharedVideo.url);
 
-    // 共享视频与本地不同:导航过去(共享视频未变时不动)
-    if (sharedVideo != null &&
-        normalizedSharedUrl != null &&
-        currentVideo?.normalizedUrl != normalizedSharedUrl) {
-      final targetRef = parseBilibiliVideoRef(sharedVideo.url);
-      if (targetRef != null) {
-        final playback = state.playback;
-        _log('Opening shared video ${targetRef.normalizedUrl}');
-        pendingRoomStateHydration = true;
-        await port.openVideo(
-          targetRef,
-          initialSeconds: playback?.currentTime ?? 0,
-          startPaused:
-              playback == null ||
-              playback.playState != PlaybackPlayState.playing,
+    if (sharedVideo != null && normalizedSharedUrl != null) {
+      final current = currentVideo;
+      // 加载早于进房时错过了 onVideoLoaded 的身份采纳:补一次
+      if (current != null &&
+          current.videoId != sharedVideo.videoId &&
+          videoIdsMayReferToSameVideo(current.videoId, sharedVideo.videoId)) {
+        currentVideo = BilibiliVideoRef(
+          videoId: sharedVideo.videoId,
+          normalizedUrl: normalizedSharedUrl,
         );
+        currentTitle ??= sharedVideo.title;
       }
-      return;
+      // 确认是不同视频(或当前无视频)才导航;同一共享 URL 只发起一次,
+      // 后续 room:state 等待目标页加载,防止导航循环堆叠页面。
+      final needsNavigation =
+          currentVideo == null ||
+          (currentVideo!.videoId != sharedVideo.videoId &&
+              currentVideo!.normalizedUrl != normalizedSharedUrl);
+      if (needsNavigation) {
+        if (_lastOpenedSharedUrl != normalizedSharedUrl) {
+          final targetRef = parseBilibiliVideoRef(sharedVideo.url);
+          if (targetRef != null) {
+            _lastOpenedSharedUrl = normalizedSharedUrl;
+            final playback = state.playback;
+            _log('Opening shared video ${targetRef.normalizedUrl}');
+            pendingRoomStateHydration = true;
+            await port.openVideo(
+              targetRef,
+              initialSeconds: playback?.currentTime ?? 0,
+              startPaused:
+                  playback == null ||
+                  playback.playState != PlaybackPlayState.playing,
+            );
+          }
+        }
+        return;
+      }
     }
 
     final decision = decidePlaybackApplication(
@@ -790,6 +870,15 @@ class PlayerSyncEngine {
     }
     _log('Sharing ${video.normalizedUrl}');
     session.shareVideo(shared, playback: playback);
+  }
+
+  /// 离房/会话被服务端终结时清理房间相关的本地判定状态。
+  void resetRoomLocalState() {
+    _lastOpenedSharedUrl = null;
+    pendingRoomStateHydration = false;
+    explicitNonSharedPlaybackUrl = null;
+    _lastAppliedVersion = null;
+    _lastLocalPlaybackVersion = null;
   }
 
   /// 当前用户是共享者且切到了新视频:自动跟进分享

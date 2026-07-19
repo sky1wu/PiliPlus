@@ -24,9 +24,12 @@ class SyncPlayService extends ChangeNotifier {
       displayName: _accountDisplayName,
       onChanged: _onSessionChanged,
       onRoomState: (state) => engine.applyRoomState(state),
-      onSessionEnded: (reason) => SmartDialog.showToast(
-        SyncPlayMessages.localizeSessionEndReason(reason),
-      ),
+      onSessionEnded: (reason) {
+        engine.resetRoomLocalState();
+        SmartDialog.showToast(
+          SyncPlayMessages.localizeSessionEndReason(reason),
+        );
+      },
       onServerError: (error) => SmartDialog.showToast(
         SyncPlayMessages.localizeServerError(error.code, error.message),
       ),
@@ -226,6 +229,7 @@ class SyncPlayService extends ChangeNotifier {
     player?.removePositionListener(_onPosition);
     player?.removeStatusLister(_onStatus);
     _playerAttached = false;
+    engine.resetRoomLocalState();
     session.requestLeaveRoom();
   }
 
