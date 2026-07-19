@@ -1,3 +1,4 @@
+import 'package:PiliPlus/sync_play/sync_play_messages.dart';
 import 'package:PiliPlus/sync_play/sync_play_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,7 +49,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
   bool _saveConnectionFields() {
     final server = _serverCtrl.text.trim();
     if (validateServerUrl(server) == null) {
-      SmartDialog.showToast('请填写有效的服务器地址(ws:// 或 wss://)');
+      SmartDialog.showToast(SyncPlayMessages.invalidServerUrl);
       return false;
     }
     service.setServerUrl(server);
@@ -72,7 +73,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     }
     final invite = parseInviteValue(_inviteCtrl.text);
     if (invite == null) {
-      SmartDialog.showToast('邀请码格式不正确(房间号:口令)');
+      SmartDialog.showToast(SyncPlayMessages.errorInvalidInviteFormat);
       return;
     }
     setState(() => _busy = true);
@@ -84,9 +85,10 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
       case JoinAttemptResult.joined:
         SmartDialog.showToast('已加入房间');
       case JoinAttemptResult.failed:
-        SmartDialog.showToast(service.session.lastError ?? '加入房间失败');
+        // 失败原因已由 service 的 onServerError 弹出本地化文案
+        break;
       case JoinAttemptResult.timeout:
-        SmartDialog.showToast('加入房间超时,请检查服务器地址');
+        SmartDialog.showToast(SyncPlayMessages.connectionServerUnreachable);
     }
   }
 
@@ -112,7 +114,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
                   const Icon(Icons.groups_outlined),
                   const SizedBox(width: 8),
                   Text(
-                    'Bili SyncPlay',
+                    SyncPlayMessages.title,
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const Spacer(),
@@ -122,7 +124,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
               const SizedBox(height: 12),
               if (session.lastError != null) ...[
                 Text(
-                  session.lastError!,
+                  SyncPlayMessages.localizeSessionError(session.lastError)!,
                   style: TextStyle(
                     color: Theme.of(context).colorScheme.error,
                     fontSize: 12,
@@ -145,7 +147,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     TextField(
       controller: _serverCtrl,
       decoration: const InputDecoration(
-        labelText: '服务器地址',
+        labelText: SyncPlayMessages.serverUrlLabel,
         hintText: 'wss://your-syncplay-server/ws',
         isDense: true,
       ),
@@ -155,14 +157,14 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     FilledButton.icon(
       onPressed: _busy ? null : _createRoom,
       icon: const Icon(Icons.add),
-      label: const Text('创建房间'),
+      label: const Text(SyncPlayMessages.actionCreate),
     ),
     const Divider(height: 32),
     TextField(
       controller: _inviteCtrl,
       decoration: const InputDecoration(
-        labelText: '邀请码',
-        hintText: 'ABC123:加入口令',
+        labelText: SyncPlayMessages.roomCodeLabel,
+        hintText: SyncPlayMessages.roomCodePlaceholder,
         isDense: true,
       ),
     ),
@@ -170,7 +172,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     FilledButton.tonalIcon(
       onPressed: _busy ? null : _joinRoom,
       icon: const Icon(Icons.login),
-      label: const Text('加入房间'),
+      label: const Text(SyncPlayMessages.actionJoin),
     ),
   ];
 
@@ -181,11 +183,11 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
       ListTile(
         contentPadding: EdgeInsets.zero,
         dense: true,
-        title: Text('房间号:${session.roomCode}'),
-        subtitle: const Text('点击复制邀请码(房间号:口令),发给同伴加入'),
+        title: Text('${SyncPlayMessages.roomCodeLabel}：${session.roomCode}'),
+        subtitle: const Text('点击复制邀请码（房间码:加入码），发给同伴加入'),
         trailing: const Icon(Icons.copy, size: 18),
         onTap: () => _copy(
-          '邀请码',
+          SyncPlayMessages.roomCodeLabel,
           formatInviteValue(
             roomCode: session.roomCode ?? '',
             joinToken: session.joinToken ?? '',
@@ -203,12 +205,24 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
             overflow: TextOverflow.ellipsis,
           ),
           subtitle: Text(
-            '共享者:${sharedVideo.sharedByDisplayName ?? sharedVideo.sharedByMemberId ?? '未知'}',
+            SyncPlayMessages.ownerSharedBy(
+              sharedVideo.sharedByDisplayName ??
+                  sharedVideo.sharedByMemberId ??
+                  '?',
+            ),
           ),
+        )
+      else
+        const ListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          leading: Icon(Icons.play_circle_outline),
+          title: Text(SyncPlayMessages.stateNoSharedVideo),
         ),
       const SizedBox(height: 4),
       Text(
-        '成员(${roomState?.members.length ?? 0})',
+        '${SyncPlayMessages.sectionRoomMembers}'
+        '(${SyncPlayMessages.membersCount(roomState?.members.length ?? 0)})',
         style: Theme.of(context).textTheme.labelLarge,
       ),
       const SizedBox(height: 4),
@@ -226,7 +240,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
               const SizedBox(width: 6),
               Text(
                 member.id == session.memberId
-                    ? '${member.name}(我)'
+                    ? SyncPlayMessages.memberSelf(member.name)
                     : member.name,
               ),
               if (member.id == sharedVideo?.sharedByMemberId) ...[
@@ -244,7 +258,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
           Navigator.of(context).pop();
         },
         icon: const Icon(Icons.screen_share_outlined),
-        label: const Text('分享当前视频'),
+        label: const Text(SyncPlayMessages.actionShareCurrentVideo),
       ),
       const SizedBox(height: 8),
       OutlinedButton.icon(
@@ -253,7 +267,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
           Navigator.of(context).pop();
         },
         icon: const Icon(Icons.logout),
-        label: const Text('离开房间'),
+        label: const Text(SyncPlayMessages.actionLeave),
       ),
     ];
   }
@@ -267,9 +281,18 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (status) {
-      SyncPlayConnectionStatus.connected => ('已连接', Colors.green),
-      SyncPlayConnectionStatus.connecting => ('连接中', Colors.orange),
-      SyncPlayConnectionStatus.disconnected => ('未连接', Colors.grey),
+      SyncPlayConnectionStatus.connected => (
+        SyncPlayMessages.statusConnected,
+        Colors.green,
+      ),
+      SyncPlayConnectionStatus.connecting => (
+        SyncPlayMessages.statusConnecting,
+        Colors.orange,
+      ),
+      SyncPlayConnectionStatus.disconnected => (
+        SyncPlayMessages.statusDisconnected,
+        Colors.grey,
+      ),
     };
     return Row(
       mainAxisSize: MainAxisSize.min,

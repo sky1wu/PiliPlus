@@ -4,6 +4,7 @@ import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/sync_play/piliplus_player_port.dart';
+import 'package:PiliPlus/sync_play/sync_play_messages.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/foundation.dart';
@@ -23,10 +24,12 @@ class SyncPlayService extends ChangeNotifier {
       displayName: _accountDisplayName,
       onChanged: _onSessionChanged,
       onRoomState: (state) => engine.applyRoomState(state),
-      onSessionEnded: (reason) =>
-          SmartDialog.showToast('Bili SyncPlay 会话已结束:$reason'),
-      onServerError: (error) =>
-          SmartDialog.showToast('Bili SyncPlay:${error.message}'),
+      onSessionEnded: (reason) => SmartDialog.showToast(
+        SyncPlayMessages.localizeSessionEndReason(reason),
+      ),
+      onServerError: (error) => SmartDialog.showToast(
+        SyncPlayMessages.localizeServerError(error.code, error.message),
+      ),
       log: _debugLog,
     );
     engine = PlayerSyncEngine(session: session, port: port, log: _debugLog);
@@ -234,10 +237,10 @@ class SyncPlayService extends ChangeNotifier {
       }
     }
     if (engine.currentVideo == null) {
-      SmartDialog.showToast('Bili SyncPlay:当前没有可分享的视频');
+      SmartDialog.showToast('当前页面没有可播放的视频。');
       return;
     }
     engine.shareCurrentVideo(snapshot: _snapshot());
-    SmartDialog.showToast('已分享当前视频');
+    SmartDialog.showToast(SyncPlayMessages.pageShareSuccess);
   }
 }
