@@ -1684,6 +1684,13 @@ packages:
       url: "https://github.com/bggRGjQaUbCoE/super_sliver_list.git"
     source: git
     version: "0.4.1"
+  sync_play_core:
+    dependency: "direct main"
+    description:
+      path: sync_play_core
+      relative: true
+    source: path
+    version: "0.1.0"
   synchronized:
     dependency: "direct main"
     description:

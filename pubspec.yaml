@@ -35,6 +35,10 @@ dependencies:
   flutter_localizations:
     sdk: flutter
 
+  # Bili-SyncPlay 协议核心(仓库内本地包,见 sync_play_core/)
+  sync_play_core:
+    path: sync_play_core
+
   app_links: ^7.1.1
   archive: ^4.0.0
   audio_service:
