@@ -136,7 +136,8 @@ class PlPlayerController with BlockConfigMixin {
   String? _bvid;
   int? cid;
 
-  String? get bvid => _bvid;
+  // 与下方既有的 `bvid`(非空强解)不同,同步模块需要可空访问
+  String? get bvidOrNull => _bvid;
   VideoType get videoType => _videoType;
   int? _epid;
   int? _seasonId;

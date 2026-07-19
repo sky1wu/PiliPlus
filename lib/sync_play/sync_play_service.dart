@@ -99,14 +99,15 @@ class SyncPlayService extends ChangeNotifier {
     if (player.isLive || player.videoType != VideoType.ugc) {
       return;
     }
-    final bvid = player.bvid;
+    final bvid = player.bvidOrNull;
     final cid = player.cid;
     if (bvid == null || cid == null) {
       return;
     }
     // 播放器实例可能是新建的:重新挂实例级监听(Set 幂等)
-    player.addPositionListener(_onPosition);
-    player.addStatusLister(_onStatus);
+    player
+      ..addPositionListener(_onPosition)
+      ..addStatusLister(_onStatus);
     _playerAttached = true;
 
     engine.onVideoLoaded(bvid: bvid, cid: cid, title: _titleCache[bvid]);
