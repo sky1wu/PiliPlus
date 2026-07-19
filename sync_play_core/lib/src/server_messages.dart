@@ -44,7 +44,8 @@ sealed class SyncPlayServerMessage {
       return null;
     }
     final serverProtocolVersion = payload['serverProtocolVersion'];
-    final valid = isRoomCode(payload['roomCode']) &&
+    final valid =
+        isRoomCode(payload['roomCode']) &&
         isActorId(payload['memberId']) &&
         isToken(payload['joinToken']) &&
         isToken(payload['memberToken']) &&
@@ -67,7 +68,8 @@ sealed class SyncPlayServerMessage {
       return null;
     }
     final serverProtocolVersion = payload['serverProtocolVersion'];
-    final valid = isRoomCode(payload['roomCode']) &&
+    final valid =
+        isRoomCode(payload['roomCode']) &&
         isActorId(payload['memberId']) &&
         isToken(payload['memberToken']) &&
         isOptionalPositiveInteger(serverProtocolVersion);

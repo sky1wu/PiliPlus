@@ -63,8 +63,10 @@ RoomState compensateRoomStateForClock(
 
   final nowMs = now ?? DateTime.now().millisecondsSinceEpoch;
   final estimatedServerNow = nowMs + clockOffsetMs;
-  final elapsedMs =
-      math.max(0.0, estimatedServerNow - playback.serverTime.toDouble());
+  final elapsedMs = math.max(
+    0.0,
+    estimatedServerNow - playback.serverTime.toDouble(),
+  );
   return RoomState(
     roomCode: state.roomCode,
     sharedVideo: state.sharedVideo,

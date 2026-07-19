@@ -54,7 +54,8 @@ class SharedVideo {
     final title = map['title'];
     final sharedByMemberId = map['sharedByMemberId'];
     final sharedByDisplayName = map['sharedByDisplayName'];
-    final valid = isBoundedString(videoId, titleMaxLength) &&
+    final valid =
+        isBoundedString(videoId, titleMaxLength) &&
         isVideoId(videoId) &&
         isBoundedString(url, urlMaxLength) &&
         isBilibiliUrl(url) &&
@@ -75,13 +76,12 @@ class SharedVideo {
   }
 
   Map<String, Object?> toJson() => {
-        'videoId': videoId,
-        'url': url,
-        'title': title,
-        if (sharedByMemberId != null) 'sharedByMemberId': sharedByMemberId,
-        if (sharedByDisplayName != null)
-          'sharedByDisplayName': sharedByDisplayName,
-      };
+    'videoId': videoId,
+    'url': url,
+    'title': title,
+    if (sharedByMemberId != null) 'sharedByMemberId': sharedByMemberId,
+    if (sharedByDisplayName != null) 'sharedByDisplayName': sharedByDisplayName,
+  };
 }
 
 class PlaybackState {
@@ -127,7 +127,8 @@ class PlaybackState {
     final syncIntent = PlaybackSyncIntent.tryParse(syncIntentRaw);
     final userInitiated = map['userInitiated'];
     final naturalEnd = map['naturalEnd'];
-    final valid = isBoundedString(map['url'], urlMaxLength) &&
+    final valid =
+        isBoundedString(map['url'], urlMaxLength) &&
         isFiniteNumber(map['currentTime']) &&
         playState != null &&
         (syncIntentRaw == null || syncIntent != null) &&
@@ -157,32 +158,32 @@ class PlaybackState {
   }
 
   Map<String, Object?> toJson() => {
-        'url': url,
-        'currentTime': currentTime,
-        'playState': playState.wire,
-        if (syncIntent != null) 'syncIntent': syncIntent!.wire,
-        if (userInitiated != null) 'userInitiated': userInitiated,
-        if (naturalEnd != null) 'naturalEnd': naturalEnd,
-        'playbackRate': playbackRate,
-        'updatedAt': updatedAt,
-        'serverTime': serverTime,
-        'actorId': actorId,
-        'seq': seq,
-      };
+    'url': url,
+    'currentTime': currentTime,
+    'playState': playState.wire,
+    if (syncIntent != null) 'syncIntent': syncIntent!.wire,
+    if (userInitiated != null) 'userInitiated': userInitiated,
+    if (naturalEnd != null) 'naturalEnd': naturalEnd,
+    'playbackRate': playbackRate,
+    'updatedAt': updatedAt,
+    'serverTime': serverTime,
+    'actorId': actorId,
+    'seq': seq,
+  };
 
   PlaybackState copyWith({double? currentTime}) => PlaybackState(
-        url: url,
-        currentTime: currentTime ?? this.currentTime,
-        playState: playState,
-        syncIntent: syncIntent,
-        userInitiated: userInitiated,
-        naturalEnd: naturalEnd,
-        playbackRate: playbackRate,
-        updatedAt: updatedAt,
-        serverTime: serverTime,
-        actorId: actorId,
-        seq: seq,
-      );
+    url: url,
+    currentTime: currentTime ?? this.currentTime,
+    playState: playState,
+    syncIntent: syncIntent,
+    userInitiated: userInitiated,
+    naturalEnd: naturalEnd,
+    playbackRate: playbackRate,
+    updatedAt: updatedAt,
+    serverTime: serverTime,
+    actorId: actorId,
+    seq: seq,
+  );
 }
 
 class RoomState {
@@ -249,9 +250,9 @@ class RoomState {
   }
 
   Map<String, Object?> toJson() => {
-        'roomCode': roomCode,
-        'sharedVideo': sharedVideo?.toJson(),
-        'playback': playback?.toJson(),
-        'members': [for (final member in members) member.toJson()],
-      };
+    'roomCode': roomCode,
+    'sharedVideo': sharedVideo?.toJson(),
+    'playback': playback?.toJson(),
+    'members': [for (final member in members) member.toJson()],
+  };
 }

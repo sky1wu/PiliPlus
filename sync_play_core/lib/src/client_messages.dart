@@ -9,14 +9,13 @@ abstract final class ClientMessages {
   static Map<String, Object?> roomCreate({
     String? displayName,
     int protocolVersion = syncPlayProtocolVersion,
-  }) =>
-      {
-        'type': 'room:create',
-        'payload': {
-          if (displayName != null) 'displayName': displayName,
-          'protocolVersion': protocolVersion,
-        },
-      };
+  }) => {
+    'type': 'room:create',
+    'payload': {
+      if (displayName != null) 'displayName': displayName,
+      'protocolVersion': protocolVersion,
+    },
+  };
 
   static Map<String, Object?> roomJoin({
     required String roomCode,
@@ -24,68 +23,58 @@ abstract final class ClientMessages {
     String? memberToken,
     String? displayName,
     int protocolVersion = syncPlayProtocolVersion,
-  }) =>
-      {
-        'type': 'room:join',
-        'payload': {
-          'roomCode': roomCode,
-          'joinToken': joinToken,
-          if (memberToken != null) 'memberToken': memberToken,
-          if (displayName != null) 'displayName': displayName,
-          'protocolVersion': protocolVersion,
-        },
-      };
+  }) => {
+    'type': 'room:join',
+    'payload': {
+      'roomCode': roomCode,
+      'joinToken': joinToken,
+      if (memberToken != null) 'memberToken': memberToken,
+      if (displayName != null) 'displayName': displayName,
+      'protocolVersion': protocolVersion,
+    },
+  };
 
   static Map<String, Object?> profileUpdate({
     required String memberToken,
     required String displayName,
-  }) =>
-      {
-        'type': 'profile:update',
-        'payload': {
-          'memberToken': memberToken,
-          'displayName': displayName,
-        },
-      };
+  }) => {
+    'type': 'profile:update',
+    'payload': {'memberToken': memberToken, 'displayName': displayName},
+  };
 
   static Map<String, Object?> roomLeave({String? memberToken}) => {
-        'type': 'room:leave',
-        if (memberToken != null) 'payload': {'memberToken': memberToken},
-      };
+    'type': 'room:leave',
+    if (memberToken != null) 'payload': {'memberToken': memberToken},
+  };
 
   static Map<String, Object?> videoShare({
     required String memberToken,
     required SharedVideo video,
     PlaybackState? playback,
-  }) =>
-      {
-        'type': 'video:share',
-        'payload': {
-          'memberToken': memberToken,
-          'video': video.toJson(),
-          if (playback != null) 'playback': playback.toJson(),
-        },
-      };
+  }) => {
+    'type': 'video:share',
+    'payload': {
+      'memberToken': memberToken,
+      'video': video.toJson(),
+      if (playback != null) 'playback': playback.toJson(),
+    },
+  };
 
   static Map<String, Object?> playbackUpdate({
     required String memberToken,
     required PlaybackState playback,
-  }) =>
-      {
-        'type': 'playback:update',
-        'payload': {
-          'memberToken': memberToken,
-          'playback': playback.toJson(),
-        },
-      };
+  }) => {
+    'type': 'playback:update',
+    'payload': {'memberToken': memberToken, 'playback': playback.toJson()},
+  };
 
   static Map<String, Object?> syncRequest({required String memberToken}) => {
-        'type': 'sync:request',
-        'payload': {'memberToken': memberToken},
-      };
+    'type': 'sync:request',
+    'payload': {'memberToken': memberToken},
+  };
 
   static Map<String, Object?> syncPing({required num clientSendTime}) => {
-        'type': 'sync:ping',
-        'payload': {'clientSendTime': clientSendTime},
-      };
+    'type': 'sync:ping',
+    'payload': {'clientSendTime': clientSendTime},
+  };
 }

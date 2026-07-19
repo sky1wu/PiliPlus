@@ -12,4 +12,6 @@ export 'src/client_messages.dart';
 export 'src/common.dart';
 export 'src/models.dart';
 export 'src/server_messages.dart';
+export 'src/session.dart';
+export 'src/transport.dart';
 export 'src/video_ref.dart';

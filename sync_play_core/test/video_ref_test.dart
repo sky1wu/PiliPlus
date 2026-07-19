@@ -87,7 +87,9 @@ void main() {
       isNull,
     );
     expect(
-      parseBilibiliVideoRef('https://www.bilibili.com/list/fav?bvid=BV1xx411c7mD'),
+      parseBilibiliVideoRef(
+        'https://www.bilibili.com/list/fav?bvid=BV1xx411c7mD',
+      ),
       isNull,
     );
   });
@@ -108,10 +110,7 @@ void main() {
     const festivalUrl =
         'https://www.bilibili.com/festival/demo?bvid=BV1ab411c7mD&cid=987654';
     final firstPass = normalizeBilibiliUrl(festivalUrl);
-    expect(
-      firstPass,
-      'https://www.bilibili.com/video/BV1ab411c7mD?cid=987654',
-    );
+    expect(firstPass, 'https://www.bilibili.com/video/BV1ab411c7mD?cid=987654');
     final secondPass = normalizeBilibiliUrl(firstPass);
     expect(secondPass, firstPass);
   });

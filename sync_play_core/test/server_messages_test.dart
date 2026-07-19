@@ -12,45 +12,43 @@ Map<String, Object?> _sharedVideo({
   String url = 'https://www.bilibili.com/video/BV1xx411c7mD?p=2',
   String? sharedByMemberId,
   String? sharedByDisplayName,
-}) =>
-    {
-      'videoId': 'BV1xx411c7mD',
-      'url': url,
-      'title': 'Video',
-      if (sharedByMemberId != null) 'sharedByMemberId': sharedByMemberId,
-      if (sharedByDisplayName != null)
-        'sharedByDisplayName': sharedByDisplayName,
-    };
+}) => {
+  'videoId': 'BV1xx411c7mD',
+  'url': url,
+  'title': 'Video',
+  if (sharedByMemberId != null) 'sharedByMemberId': sharedByMemberId,
+  if (sharedByDisplayName != null) 'sharedByDisplayName': sharedByDisplayName,
+};
 
 Map<String, Object?> _playback(Map<String, Object?> overrides) => {
-      'url': 'https://www.bilibili.com/video/BV1xx411c7mD?p=2',
-      'currentTime': 12,
-      'playState': 'playing',
-      'playbackRate': 1,
-      'updatedAt': 1,
-      'serverTime': 1,
-      'actorId': 'member-1',
-      'seq': 1,
-      ...overrides,
-    };
+  'url': 'https://www.bilibili.com/video/BV1xx411c7mD?p=2',
+  'currentTime': 12,
+  'playState': 'playing',
+  'playbackRate': 1,
+  'updatedAt': 1,
+  'serverTime': 1,
+  'actorId': 'member-1',
+  'seq': 1,
+  ...overrides,
+};
 
 Map<String, Object?> _roomStateMessage({
   Object? sharedVideo,
   Object? playback,
   Object? members,
-}) =>
-    {
-      'type': 'room:state',
-      'payload': {
-        'roomCode': 'ABC123',
-        'sharedVideo': sharedVideo,
-        'playback': playback,
-        'members': members ??
-            [
-              {'id': 'member-1', 'name': 'Alice'},
-            ],
-      },
-    };
+}) => {
+  'type': 'room:state',
+  'payload': {
+    'roomCode': 'ABC123',
+    'sharedVideo': sharedVideo,
+    'playback': playback,
+    'members':
+        members ??
+        [
+          {'id': 'member-1', 'name': 'Alice'},
+        ],
+  },
+};
 
 void main() {
   test('accepts a valid room:created message', () {
@@ -73,10 +71,12 @@ void main() {
   });
 
   test('accepts a valid room:state message', () {
-    final message = SyncPlayServerMessage.tryParse(_roomStateMessage(
-      sharedVideo: _sharedVideo(),
-      playback: _playback({'syncIntent': 'explicit-seek'}),
-    ));
+    final message = SyncPlayServerMessage.tryParse(
+      _roomStateMessage(
+        sharedVideo: _sharedVideo(),
+        playback: _playback({'syncIntent': 'explicit-seek'}),
+      ),
+    );
     expect(message, isA<RoomStateMessage>());
     final state = (message as RoomStateMessage).state;
     expect(state.roomCode, 'ABC123');
@@ -90,41 +90,51 @@ void main() {
 
   test('accepts room:state when member ids use UUIDs', () {
     const uuid = '123e4567-e89b-12d3-a456-426614174000';
-    final message = SyncPlayServerMessage.tryParse(_roomStateMessage(
-      sharedVideo: _sharedVideo(sharedByMemberId: uuid),
-      playback: _playback({'actorId': uuid}),
-      members: [
-        {'id': uuid, 'name': 'Alice'},
-      ],
-    ));
+    final message = SyncPlayServerMessage.tryParse(
+      _roomStateMessage(
+        sharedVideo: _sharedVideo(sharedByMemberId: uuid),
+        playback: _playback({'actorId': uuid}),
+        members: [
+          {'id': uuid, 'name': 'Alice'},
+        ],
+      ),
+    );
     expect(message, isA<RoomStateMessage>());
   });
 
-  test('accepts room:state when playback sync intent is explicit-ratechange',
-      () {
-    final message = SyncPlayServerMessage.tryParse(_roomStateMessage(
-      sharedVideo: _sharedVideo(),
-      playback:
-          _playback({'syncIntent': 'explicit-ratechange', 'playbackRate': 1.5}),
-    ));
-    expect(message, isA<RoomStateMessage>());
-    final playback = (message as RoomStateMessage).state.playback!;
-    expect(playback.syncIntent, PlaybackSyncIntent.explicitRatechange);
-    expect(playback.playbackRate, 1.5);
-  });
+  test(
+    'accepts room:state when playback sync intent is explicit-ratechange',
+    () {
+      final message = SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(),
+          playback: _playback({
+            'syncIntent': 'explicit-ratechange',
+            'playbackRate': 1.5,
+          }),
+        ),
+      );
+      expect(message, isA<RoomStateMessage>());
+      final playback = (message as RoomStateMessage).state.playback!;
+      expect(playback.syncIntent, PlaybackSyncIntent.explicitRatechange);
+      expect(playback.playbackRate, 1.5);
+    },
+  );
 
-  test('accepts room:joined when memberId uses max-compatible actor format',
-      () {
-    final message = SyncPlayServerMessage.tryParse({
-      'type': 'room:joined',
-      'payload': {
-        'roomCode': 'ABC123',
-        'memberId': 'member_01:host',
-        'memberToken': validToken,
-      },
-    });
-    expect(message, isA<RoomJoinedMessage>());
-  });
+  test(
+    'accepts room:joined when memberId uses max-compatible actor format',
+    () {
+      final message = SyncPlayServerMessage.tryParse({
+        'type': 'room:joined',
+        'payload': {
+          'roomCode': 'ABC123',
+          'memberId': 'member_01:host',
+          'memberToken': validToken,
+        },
+      });
+      expect(message, isA<RoomJoinedMessage>());
+    },
+  );
 
   test('accepts room member delta messages', () {
     expect(
@@ -188,123 +198,147 @@ void main() {
   });
 
   test('accepts room:state when playback carries userInitiated:true', () {
-    final message = SyncPlayServerMessage.tryParse(_roomStateMessage(
-      sharedVideo: _sharedVideo(),
-      playback: _playback({'playState': 'paused', 'userInitiated': true}),
-    ));
+    final message = SyncPlayServerMessage.tryParse(
+      _roomStateMessage(
+        sharedVideo: _sharedVideo(),
+        playback: _playback({'playState': 'paused', 'userInitiated': true}),
+      ),
+    );
     expect(message, isA<RoomStateMessage>());
     expect((message as RoomStateMessage).state.playback!.userInitiated, isTrue);
   });
 
   test('rejects room:state when playback userInitiated is non-boolean', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        sharedVideo: _sharedVideo(),
-        playback: _playback({'playState': 'paused', 'userInitiated': 'yes'}),
-      )),
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(),
+          playback: _playback({'playState': 'paused', 'userInitiated': 'yes'}),
+        ),
+      ),
       isNull,
     );
   });
 
   test('accepts room:state when playback carries naturalEnd:true', () {
-    final message = SyncPlayServerMessage.tryParse(_roomStateMessage(
-      sharedVideo: _sharedVideo(),
-      playback: _playback({
-        'playState': 'paused',
-        'naturalEnd': true,
-        'currentTime': 262.5,
-      }),
-    ));
+    final message = SyncPlayServerMessage.tryParse(
+      _roomStateMessage(
+        sharedVideo: _sharedVideo(),
+        playback: _playback({
+          'playState': 'paused',
+          'naturalEnd': true,
+          'currentTime': 262.5,
+        }),
+      ),
+    );
     expect(message, isA<RoomStateMessage>());
     expect((message as RoomStateMessage).state.playback!.naturalEnd, isTrue);
   });
 
   test('rejects room:state when playback naturalEnd is non-boolean', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        sharedVideo: _sharedVideo(),
-        playback: _playback({'playState': 'paused', 'naturalEnd': 'yes'}),
-      )),
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(),
+          playback: _playback({'playState': 'paused', 'naturalEnd': 'yes'}),
+        ),
+      ),
       isNull,
     );
   });
 
   test('rejects room:state when playback sync intent is invalid', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        sharedVideo: _sharedVideo(),
-        playback: _playback({'syncIntent': 'follow'}),
-      )),
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(),
+          playback: _playback({'syncIntent': 'follow'}),
+        ),
+      ),
       isNull,
     );
   });
 
-  test('accepts room:state when sharedByDisplayName is set on the shared video',
-      () {
-    final message = SyncPlayServerMessage.tryParse(_roomStateMessage(
-      sharedVideo: _sharedVideo(
-        url: 'https://www.bilibili.com/video/BV1xx411c7mD',
-        sharedByMemberId: 'member-1',
-        sharedByDisplayName: 'Alice',
-      ),
-    ));
-    expect(message, isA<RoomStateMessage>());
-    expect(
-      (message as RoomStateMessage).state.sharedVideo!.sharedByDisplayName,
-      'Alice',
-    );
-  });
+  test(
+    'accepts room:state when sharedByDisplayName is set on the shared video',
+    () {
+      final message = SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(
+            url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+            sharedByMemberId: 'member-1',
+            sharedByDisplayName: 'Alice',
+          ),
+        ),
+      );
+      expect(message, isA<RoomStateMessage>());
+      expect(
+        (message as RoomStateMessage).state.sharedVideo!.sharedByDisplayName,
+        'Alice',
+      );
+    },
+  );
 
   test('rejects room:state when sharedByDisplayName exceeds the bound', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        sharedVideo: _sharedVideo(
-          url: 'https://www.bilibili.com/video/BV1xx411c7mD',
-          sharedByMemberId: 'member-1',
-          sharedByDisplayName: 'x' * 33,
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(
+            url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+            sharedByMemberId: 'member-1',
+            sharedByDisplayName: 'x' * 33,
+          ),
         ),
-      )),
+      ),
       isNull,
     );
   });
 
   test('rejects room:state when sharedByMemberId format is invalid', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        sharedVideo: _sharedVideo(
-          url: 'https://www.bilibili.com/video/BV1xx411c7mD',
-          sharedByMemberId: 'member 1',
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(
+            url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+            sharedByMemberId: 'member 1',
+          ),
         ),
-      )),
+      ),
       isNull,
     );
   });
 
   test('rejects room:state when shared video url is invalid', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        sharedVideo: _sharedVideo(url: 'https://example.com/video/BV1xx411c7mD'),
-      )),
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          sharedVideo: _sharedVideo(
+            url: 'https://example.com/video/BV1xx411c7mD',
+          ),
+        ),
+      ),
       isNull,
     );
   });
 
   test('rejects room:state when playback actorId format is invalid', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        playback: _playback({'actorId': 'member 1'}),
-      )),
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(playback: _playback({'actorId': 'member 1'})),
+      ),
       isNull,
     );
   });
 
   test('rejects room:state when members contain invalid items', () {
     expect(
-      SyncPlayServerMessage.tryParse(_roomStateMessage(
-        members: [
-          {'id': 'member-1', 'name': 123},
-        ],
-      )),
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          members: [
+            {'id': 'member-1', 'name': 123},
+          ],
+        ),
+      ),
       isNull,
     );
   });
@@ -326,7 +360,9 @@ void main() {
     });
     expect(message, isA<ServerErrorMessage>());
     expect(
-        (message as ServerErrorMessage).code, SyncPlayErrorCode.roomNotFound);
+      (message as ServerErrorMessage).code,
+      SyncPlayErrorCode.roomNotFound,
+    );
   });
 
   test('accepts a valid sync:pong message', () {

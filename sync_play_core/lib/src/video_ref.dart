@@ -31,14 +31,14 @@ final RegExp _trailingSlashes = RegExp(r'/+$');
 ({String kind, String id})? _parseSupportedBilibiliPath(String pathname) {
   final normalizedPath = pathname.replaceAll(_trailingSlashes, '');
 
-  final videoMatch =
-      RegExp(r'^/video/([^/?]+)$').firstMatch(normalizedPath);
+  final videoMatch = RegExp(r'^/video/([^/?]+)$').firstMatch(normalizedPath);
   if (videoMatch != null) {
     return (kind: 'video', id: videoMatch.group(1)!);
   }
 
-  final bangumiMatch =
-      RegExp(r'^/bangumi/play/([^/?]+)$').firstMatch(normalizedPath);
+  final bangumiMatch = RegExp(
+    r'^/bangumi/play/([^/?]+)$',
+  ).firstMatch(normalizedPath);
   if (bangumiMatch != null) {
     return (kind: 'bangumi', id: bangumiMatch.group(1)!);
   }
@@ -90,13 +90,13 @@ BilibiliVideoRef? parseBilibiliVideoRef(String? url) {
         videoId: cid != null
             ? '$bvid:$cid'
             : p != null
-                ? '$bvid:p$p'
-                : bvid,
+            ? '$bvid:p$p'
+            : bvid,
         normalizedUrl: cid != null
             ? 'https://www.bilibili.com/video/$bvid?cid=$cid'
             : p != null
-                ? 'https://www.bilibili.com/video/$bvid?p=$p'
-                : 'https://www.bilibili.com/video/$bvid',
+            ? 'https://www.bilibili.com/video/$bvid?p=$p'
+            : 'https://www.bilibili.com/video/$bvid',
       );
     }
 
@@ -105,20 +105,19 @@ BilibiliVideoRef? parseBilibiliVideoRef(String? url) {
     }
 
     final p = _nonEmpty(query['p']);
-    final cid =
-        supportedPath.kind == 'video' ? _nonEmpty(query['cid']) : null;
+    final cid = supportedPath.kind == 'video' ? _nonEmpty(query['cid']) : null;
     final basePath =
         '${parsed.origin}${parsed.path.replaceAll(_trailingSlashes, '')}';
     final videoId = cid != null
         ? '${supportedPath.id}:$cid'
         : p != null
-            ? '${supportedPath.id}:p$p'
-            : supportedPath.id;
+        ? '${supportedPath.id}:p$p'
+        : supportedPath.id;
     final normalizedUrl = cid != null
         ? '$basePath?cid=$cid'
         : p != null
-            ? '$basePath?p=$p'
-            : basePath;
+        ? '$basePath?p=$p'
+        : basePath;
     return BilibiliVideoRef(videoId: videoId, normalizedUrl: normalizedUrl);
   } on FormatException {
     return null;

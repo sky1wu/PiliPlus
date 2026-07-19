@@ -10,24 +10,23 @@ PlaybackState _playback({
   double currentTime = 10,
   double playbackRate = 1,
   num serverTime = 1000,
-}) =>
-    PlaybackState(
-      url: 'https://www.bilibili.com/video/BV1xx411c7mD',
-      currentTime: currentTime,
-      playState: playState,
-      playbackRate: playbackRate,
-      updatedAt: 1,
-      serverTime: serverTime,
-      actorId: 'member-1',
-      seq: 1,
-    );
+}) => PlaybackState(
+  url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+  currentTime: currentTime,
+  playState: playState,
+  playbackRate: playbackRate,
+  updatedAt: 1,
+  serverTime: serverTime,
+  actorId: 'member-1',
+  seq: 1,
+);
 
 RoomState _roomState(PlaybackState? playback) => RoomState(
-      roomCode: 'ABC123',
-      sharedVideo: null,
-      playback: playback,
-      members: const [RoomMember(id: 'member-1', name: 'Alice')],
-    );
+  roomCode: 'ABC123',
+  sharedVideo: null,
+  playback: playback,
+  members: const [RoomMember(id: 'member-1', name: 'Alice')],
+);
 
 void main() {
   test('first clock sample is taken as-is', () {
@@ -86,25 +85,37 @@ void main() {
 
   test('returns state unchanged when paused, or without offset/playback', () {
     final paused = _roomState(_playback(playState: PlaybackPlayState.paused));
-    expect(identical(compensateRoomStateForClock(paused, 100, now: 0), paused),
-        isTrue);
+    expect(
+      identical(compensateRoomStateForClock(paused, 100, now: 0), paused),
+      isTrue,
+    );
 
     final playing = _roomState(_playback(playState: PlaybackPlayState.playing));
     expect(
-        identical(compensateRoomStateForClock(playing, null, now: 0), playing),
-        isTrue);
+      identical(compensateRoomStateForClock(playing, null, now: 0), playing),
+      isTrue,
+    );
 
     final empty = _roomState(null);
-    expect(identical(compensateRoomStateForClock(empty, 100, now: 0), empty),
-        isTrue);
+    expect(
+      identical(compensateRoomStateForClock(empty, 100, now: 0), empty),
+      isTrue,
+    );
   });
 
   test('converts websocket URLs to healthcheck/connection-check URLs', () {
-    expect(toHealthcheckUrl('wss://sync.example.com/ws?room=1#x'),
-        'https://sync.example.com/');
-    expect(toHealthcheckUrl('ws://localhost:8787/ws'), 'http://localhost:8787/');
-    expect(toConnectionCheckUrl('wss://sync.example.com:8443/ws'),
-        'https://sync.example.com:8443/api/connection-check');
+    expect(
+      toHealthcheckUrl('wss://sync.example.com/ws?room=1#x'),
+      'https://sync.example.com/',
+    );
+    expect(
+      toHealthcheckUrl('ws://localhost:8787/ws'),
+      'http://localhost:8787/',
+    );
+    expect(
+      toConnectionCheckUrl('wss://sync.example.com:8443/ws'),
+      'https://sync.example.com:8443/api/connection-check',
+    );
     expect(toHealthcheckUrl('https://sync.example.com/'), isNull);
     expect(toConnectionCheckUrl('not-a-url'), isNull);
   });

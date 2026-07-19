@@ -60,13 +60,10 @@ void main() {
         },
       },
     );
-    expect(
-      ClientMessages.syncRequest(memberToken: 'member-token-1234567890'),
-      {
-        'type': 'sync:request',
-        'payload': {'memberToken': 'member-token-1234567890'},
-      },
-    );
+    expect(ClientMessages.syncRequest(memberToken: 'member-token-1234567890'), {
+      'type': 'sync:request',
+      'payload': {'memberToken': 'member-token-1234567890'},
+    });
   });
 
   test('room:leave omits payload entirely when no member token', () {
