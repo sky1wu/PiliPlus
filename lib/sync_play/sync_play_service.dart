@@ -5,6 +5,7 @@ import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/sync_play/piliplus_player_port.dart';
 import 'package:PiliPlus/utils/storage.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:sync_play_core/sync_play_core.dart';
@@ -19,11 +20,13 @@ class SyncPlayService extends ChangeNotifier {
   SyncPlayService._() {
     session = SyncPlayRoomSession(
       serverUrl: serverUrl,
-      displayName: displayName.isEmpty ? null : displayName,
+      displayName: _accountDisplayName,
       onChanged: _onSessionChanged,
       onRoomState: (state) => engine.applyRoomState(state),
-      onSessionEnded: (reason) => SmartDialog.showToast('一起看会话已结束:$reason'),
-      onServerError: (error) => SmartDialog.showToast('一起看:${error.message}'),
+      onSessionEnded: (reason) =>
+          SmartDialog.showToast('Bili SyncPlay 会话已结束:$reason'),
+      onServerError: (error) =>
+          SmartDialog.showToast('Bili SyncPlay:${error.message}'),
       log: _debugLog,
     );
     engine = PlayerSyncEngine(session: session, port: port, log: _debugLog);
@@ -36,7 +39,6 @@ class SyncPlayService extends ChangeNotifier {
   static SyncPlayService get to => _instance ??= SyncPlayService._();
 
   static const String _keyServerUrl = 'syncPlayServerUrl';
-  static const String _keyDisplayName = 'syncPlayDisplayName';
 
   late final SyncPlayRoomSession session;
   late final PlayerSyncEngine engine;
@@ -50,22 +52,23 @@ class SyncPlayService extends ChangeNotifier {
   String get serverUrl =>
       GStorage.setting.get(_keyServerUrl, defaultValue: '') as String;
 
-  String get displayName =>
-      GStorage.setting.get(_keyDisplayName, defaultValue: '') as String;
+  /// 昵称与浏览器扩展一致(content/user-reporter.ts):登录用 B 站昵称,
+  /// 空则 UID-{mid};未登录返回 null(不传 displayName),由服务端分配
+  /// Guest-xxx(server: ws-session-handler.ts)。不提供用户输入。
+  String? get _accountDisplayName {
+    final info = Pref.userInfoCache;
+    final uname = info?.uname?.trim();
+    if (uname != null && uname.isNotEmpty) {
+      return uname;
+    }
+    final mid = info?.mid;
+    return mid == null ? null : 'UID-$mid';
+  }
 
   void setServerUrl(String value) {
     final trimmed = value.trim();
     GStorage.setting.put(_keyServerUrl, trimmed);
     session.serverUrl = trimmed;
-    notifyListeners();
-  }
-
-  void setDisplayName(String value) {
-    final trimmed = value.trim();
-    GStorage.setting.put(_keyDisplayName, trimmed);
-    if (trimmed.isNotEmpty) {
-      session.updateDisplayName(trimmed);
-    }
     notifyListeners();
   }
 
@@ -202,14 +205,14 @@ class SyncPlayService extends ChangeNotifier {
   Future<void> createRoom() async {
     session
       ..serverUrl = serverUrl
-      ..displayName = displayName.isEmpty ? null : displayName;
+      ..displayName = _accountDisplayName;
     await session.requestCreateRoom();
   }
 
   Future<JoinAttemptResult> joinRoom(String roomCode, String joinToken) async {
     session
       ..serverUrl = serverUrl
-      ..displayName = displayName.isEmpty ? null : displayName;
+      ..displayName = _accountDisplayName;
     final result = session.waitForJoinAttemptResult();
     await session.requestJoinRoom(roomCode, joinToken);
     return result;
@@ -231,7 +234,7 @@ class SyncPlayService extends ChangeNotifier {
       }
     }
     if (engine.currentVideo == null) {
-      SmartDialog.showToast('一起看:当前没有可分享的视频');
+      SmartDialog.showToast('Bili SyncPlay:当前没有可分享的视频');
       return;
     }
     engine.shareCurrentVideo(snapshot: _snapshot());

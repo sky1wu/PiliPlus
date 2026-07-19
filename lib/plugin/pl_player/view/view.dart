@@ -449,7 +449,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       BottomControlType.syncPlay => ComBtn(
         width: widgetWidth,
         height: 30,
-        tooltip: '一起看',
+        tooltip: 'Bili SyncPlay',
         icon: ListenableBuilder(
           listenable: SyncPlayService.to,
           builder: (context, _) => Icon(

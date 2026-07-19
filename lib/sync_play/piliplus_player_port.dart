@@ -44,7 +44,7 @@ class PiliPlusPlayerPort implements SyncPlayPlayerPort {
     final id = parts.first;
     if (!id.startsWith('BV')) {
       // v1 边界:仅支持普通视频(ugc)
-      SmartDialog.showToast('一起看暂不支持该视频类型($id)');
+      SmartDialog.showToast('Bili SyncPlay 暂不支持该视频类型($id)');
       return;
     }
     final suffix = parts.length > 1 ? parts[1] : null;
@@ -73,7 +73,7 @@ class PiliPlusPlayerPort implements SyncPlayPlayerPort {
         cid ??= response.cid;
       }
       if (cid == null) {
-        SmartDialog.showToast('一起看:无法解析共享视频($id)');
+        SmartDialog.showToast('Bili SyncPlay:无法解析共享视频($id)');
         return;
       }
     }

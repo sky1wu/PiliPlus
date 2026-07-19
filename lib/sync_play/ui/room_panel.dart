@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:sync_play_core/sync_play_core.dart';
 
-/// "一起看"房间面板:建房/加入/成员列表/分享/离开。
+/// Bili SyncPlay 房间面板:建房/加入/成员列表/分享/离开。
 /// 从播放器底部控制栏的按钮弹出(BottomSheet)。
+/// 邀请码沿用浏览器扩展的 `roomCode:joinToken` 格式,输入与复制均不拆分;
+/// 昵称不做输入:登录取 B 站昵称,未登录由服务端分配 Guest-xxx。
 class SyncPlayRoomPanel extends StatefulWidget {
   const SyncPlayRoomPanel({super.key});
 
@@ -27,24 +29,19 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
   SyncPlayService get service => SyncPlayService.to;
 
   late final TextEditingController _serverCtrl;
-  late final TextEditingController _nameCtrl;
-  final TextEditingController _roomCodeCtrl = TextEditingController();
-  final TextEditingController _joinTokenCtrl = TextEditingController();
+  final TextEditingController _inviteCtrl = TextEditingController();
   bool _busy = false;
 
   @override
   void initState() {
     super.initState();
     _serverCtrl = TextEditingController(text: service.serverUrl);
-    _nameCtrl = TextEditingController(text: service.displayName);
   }
 
   @override
   void dispose() {
     _serverCtrl.dispose();
-    _nameCtrl.dispose();
-    _roomCodeCtrl.dispose();
-    _joinTokenCtrl.dispose();
+    _inviteCtrl.dispose();
     super.dispose();
   }
 
@@ -54,9 +51,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
       SmartDialog.showToast('请填写有效的服务器地址(ws:// 或 wss://)');
       return false;
     }
-    service
-      ..setServerUrl(server)
-      ..setDisplayName(_nameCtrl.text);
+    service.setServerUrl(server);
     return true;
   }
 
@@ -75,14 +70,13 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     if (!_saveConnectionFields()) {
       return;
     }
-    final roomCode = _roomCodeCtrl.text.trim();
-    final joinToken = _joinTokenCtrl.text.trim();
-    if (roomCode.isEmpty || joinToken.isEmpty) {
-      SmartDialog.showToast('请填写房间号与加入口令');
+    final invite = parseInviteValue(_inviteCtrl.text);
+    if (invite == null) {
+      SmartDialog.showToast('邀请码格式不正确(房间号:口令)');
       return;
     }
     setState(() => _busy = true);
-    final result = await service.joinRoom(roomCode, joinToken);
+    final result = await service.joinRoom(invite.roomCode, invite.joinToken);
     if (mounted) {
       setState(() => _busy = false);
     }
@@ -117,7 +111,10 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
                 children: [
                   const Icon(Icons.groups_outlined),
                   const SizedBox(width: 8),
-                  Text('一起看', style: Theme.of(context).textTheme.titleMedium),
+                  Text(
+                    'Bili SyncPlay',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                   const Spacer(),
                   _StatusChip(status: session.status),
                 ],
@@ -154,13 +151,7 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
       ),
       keyboardType: TextInputType.url,
     ),
-    const SizedBox(height: 8),
-    TextField(
-      controller: _nameCtrl,
-      decoration: const InputDecoration(labelText: '昵称(可选)', isDense: true),
-      maxLength: 32,
-    ),
-    const SizedBox(height: 4),
+    const SizedBox(height: 12),
     FilledButton.icon(
       onPressed: _busy ? null : _createRoom,
       icon: const Icon(Icons.add),
@@ -168,18 +159,12 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     ),
     const Divider(height: 32),
     TextField(
-      controller: _roomCodeCtrl,
+      controller: _inviteCtrl,
       decoration: const InputDecoration(
-        labelText: '房间号',
-        hintText: '6 位大写字母/数字',
+        labelText: '邀请码',
+        hintText: 'ABC123:加入口令',
         isDense: true,
       ),
-      textCapitalization: TextCapitalization.characters,
-    ),
-    const SizedBox(height: 8),
-    TextField(
-      controller: _joinTokenCtrl,
-      decoration: const InputDecoration(labelText: '加入口令', isDense: true),
     ),
     const SizedBox(height: 12),
     FilledButton.tonalIcon(
@@ -197,10 +182,15 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
         contentPadding: EdgeInsets.zero,
         dense: true,
         title: Text('房间号:${session.roomCode}'),
-        subtitle: const Text('点击复制房间号与口令,发给同伴加入'),
+        subtitle: const Text('点击复制邀请码(房间号:口令),发给同伴加入'),
         trailing: const Icon(Icons.copy, size: 18),
-        onTap: () =>
-            _copy('房间信息', '房间号:${session.roomCode}\n口令:${session.joinToken}'),
+        onTap: () => _copy(
+          '邀请码',
+          formatInviteValue(
+            roomCode: session.roomCode ?? '',
+            joinToken: session.joinToken ?? '',
+          ),
+        ),
       ),
       if (sharedVideo != null)
         ListTile(

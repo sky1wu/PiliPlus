@@ -10,6 +10,7 @@ library;
 export 'src/clock_sync.dart';
 export 'src/client_messages.dart';
 export 'src/common.dart';
+export 'src/invite.dart';
 export 'src/models.dart';
 export 'src/player_sync.dart';
 export 'src/server_messages.dart';
