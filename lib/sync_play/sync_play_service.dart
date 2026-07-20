@@ -41,6 +41,7 @@ class SyncPlayService extends ChangeNotifier {
     PlPlayerController.syncPlaySeekListeners.add(_onSeek);
     PlPlayerController.syncPlayUserToggleListeners.add(_onUserToggle);
     PlPlayerController.syncPlayPlayerDisposeListeners.add(_onPlayerDisposed);
+    PlPlayerController.syncPlayBufferingListeners.add(_onBuffering);
   }
 
   static SyncPlayService? _instance;
@@ -213,16 +214,26 @@ class SyncPlayService extends ChangeNotifier {
     await _fetchTitle(bvid);
   }
 
+  /// 播放态映射。缓冲必须独立上报:PlPlayer 缓冲时 playerStatus 仍是
+  /// playing(那是播放意图),位置却停着。都报成 playing 的话,服务端只
+  /// 看到"在播 + 位置不动",超过 2.5s 就会按位置差判成一次新 seek,
+  /// 把房间拽回旧进度(server: derivePlaybackAuthorityKind)。
+  static PlaybackPlayState _playState(PlPlayerController? player) {
+    if (player == null || !player.playerStatus.value.isPlaying) {
+      return PlaybackPlayState.paused;
+    }
+    return player.isBuffering.value
+        ? PlaybackPlayState.buffering
+        : PlaybackPlayState.playing;
+  }
+
   LocalPlaybackSnapshot _snapshot({double? positionSeconds}) {
     final player = PlPlayerController.instance;
-    final status = player?.playerStatus.value ?? PlayerStatus.paused;
     return (
       positionSeconds:
           positionSeconds ??
           (player == null ? 0 : player.positionInMilliseconds / 1000),
-      playState: status == PlayerStatus.playing
-          ? PlaybackPlayState.playing
-          : PlaybackPlayState.paused,
+      playState: _playState(player),
       playbackRate: player?.playbackSpeed ?? 1,
     );
   }
@@ -255,6 +266,20 @@ class SyncPlayService extends ChangeNotifier {
       case PlayerStatus.completed:
         engine.onLocalEnded(_snapshot());
     }
+  }
+
+  /// 缓冲开始/结束。只在播放中才有意义(暂停态本就是 stop-like),
+  /// 施加窗口内的缓冲由引擎按回声抑制。
+  void _onBuffering(PlPlayerController player, bool buffering) {
+    if (!inRoom || !player.playerStatus.value.isPlaying) {
+      return;
+    }
+    engine.onLocalPlayStateChanged(
+      buffering
+          ? LocalPlaybackEventSource.waiting
+          : LocalPlaybackEventSource.playing,
+      _snapshot(),
+    );
   }
 
   void _onSeek(PlPlayerController player, Duration position) {

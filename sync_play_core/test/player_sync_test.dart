@@ -378,8 +378,21 @@ void main() {
         );
         expect(harness.session.playbackUpdates, isEmpty);
 
-        // 窗口过期后同类事件正常广播
+        // 固定窗口过期,但 seek 尚未在播放器上落地:仍视为回声窗口内,
+        // 否则会把 seek 前的旧位置当成新 seek 广播出去
         harness.now += programmaticApplyWindowMs + 100;
+        harness.engine.onLocalPosition(harness.snapshot(position: 10));
+        expect(harness.engine.isInProgrammaticApplyWindow, isTrue);
+        harness.engine.onLocalPlayStateChanged(
+          LocalPlaybackEventSource.playing,
+          harness.snapshot(),
+        );
+        expect(harness.session.playbackUpdates, isEmpty);
+
+        // 位置到位后收敛回常规窗口,过期即恢复广播
+        harness.engine.onLocalPosition(harness.snapshot(position: 30));
+        harness.now += programmaticApplyWindowMs + 100;
+        expect(harness.engine.isInProgrammaticApplyWindow, isFalse);
         harness.engine.onLocalPlayStateChanged(
           LocalPlaybackEventSource.playing,
           harness.snapshot(),
@@ -387,6 +400,107 @@ void main() {
         expect(harness.session.playbackUpdates, hasLength(1));
       },
     );
+
+    test('broadcasts buffering as a stop-like state', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.now += programmaticApplyWindowMs + 100;
+
+      harness.engine.onLocalPlayStateChanged(
+        LocalPlaybackEventSource.waiting,
+        harness.snapshot(playState: PlaybackPlayState.buffering),
+      );
+      expect(harness.session.playbackUpdates, hasLength(1));
+      expect(
+        harness.session.playbackUpdates.single.playState,
+        PlaybackPlayState.buffering,
+      );
+      // 缓冲不是用户操作,不得带显式控制意图
+      expect(harness.session.playbackUpdates.single.syncIntent, isNull);
+      expect(harness.session.playbackUpdates.single.userInitiated, isNull);
+    });
+
+    test('suppresses buffering caused by applying remote playback', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.lastKnownPositionSeconds = 10;
+      harness.engine.lastKnownRate = 1;
+      final state = roomState(playback: playback(currentTime: 30));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.session.playbackUpdates.clear();
+
+      // 施加引起的缓冲:位置还停在 10,广播出去会把房间按旧位置打成暂停
+      harness.now += programmaticApplyWindowMs + 100;
+      harness.engine.onLocalPlayStateChanged(
+        LocalPlaybackEventSource.waiting,
+        harness.snapshot(position: 10, playState: PlaybackPlayState.buffering),
+      );
+      expect(harness.session.playbackUpdates, isEmpty);
+    });
+
+    test('does not heartbeat stale positions while applying', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.lastKnownPositionSeconds = 10;
+      harness.engine.lastKnownRate = 1;
+      final state = roomState(playback: playback(currentTime: 200));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.session.playbackUpdates.clear();
+
+      // seek 未落地期间的位置心跳仍报旧位置,广播会被服务端当成新 seek
+      harness.now += timeupdateBroadcastMinIntervalMs + 100;
+      harness.engine.onLocalPosition(harness.snapshot(position: 10));
+      expect(harness.session.playbackUpdates, isEmpty);
+
+      // 到位后恢复心跳
+      harness.engine.onLocalPosition(harness.snapshot(position: 200));
+      harness.now += programmaticApplyWindowMs + timeupdateBroadcastMinIntervalMs;
+      harness.engine.onLocalPosition(harness.snapshot(position: 202));
+      expect(harness.session.playbackUpdates, hasLength(1));
+      expect(harness.session.playbackUpdates.single.currentTime, 202);
+    });
+
+    test('programmatic seek settle window expires on timeout', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.lastKnownPositionSeconds = 10;
+      harness.engine.lastKnownRate = 1;
+      final state = roomState(playback: playback(currentTime: 30));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      // seek 始终没落地(换源/失败):窗口不得无限挂着
+      harness.now += programmaticSeekSettleTimeoutMs + 100;
+      harness.engine.onLocalPosition(harness.snapshot(position: 10));
+      expect(harness.engine.isInProgrammaticApplyWindow, isFalse);
+    });
+
+    test('user seek during settle wait is broadcast, not swallowed', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.lastKnownPositionSeconds = 10;
+      harness.engine.lastKnownRate = 1;
+      final state = roomState(playback: playback(currentTime: 30));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.session.playbackUpdates.clear();
+
+      harness.now += programmaticApplyWindowMs + 100;
+      // 目标位置附近的 seek 回流是施加回声
+      harness.engine.onLocalSeek(harness.snapshot(position: 30));
+      expect(harness.session.playbackUpdates, isEmpty);
+
+      // 等待到位期间用户又拖了进度条:明显偏离目标,按用户意图广播
+      harness.engine.onLocalSeek(harness.snapshot(position: 120));
+      expect(harness.session.playbackUpdates, hasLength(1));
+      expect(harness.session.playbackUpdates.single.currentTime, 120);
+      expect(
+        harness.session.playbackUpdates.single.syncIntent,
+        PlaybackSyncIntent.explicitSeek,
+      );
+    });
 
     test(
       'navigates to a different shared video with position and pause',

@@ -8,8 +8,13 @@
 ///   `rateOnly` 档按 ignore 处理(0.45–0.9s 漂移容忍,等下一拍),
 ///   `softApply` 档按 hardSeek 处理;
 /// - 无远端 pause 防闪抖 debounce(REMOTE_PAUSE_DEBOUNCE_MS):直接施加;
-/// - 无 buffer-pause 升级分类:宿主播放器(PlPlayer)有独立 buffering 信号;
+/// - 无 buffer-pause 升级分类:宿主播放器(PlPlayer)有独立 buffering 信号,
+///   由桥接层映射成 `buffering` 播放态与 `waiting` 事件源传入;
 /// - 无 festival/watchlater 特例:App 内路由不存在该形态。
+///
+/// 相对浏览器端的移动端专属处理:
+/// - 程序化 seek 的回声窗口按"位置真正到位"关闭(见
+///   [programmaticSeekSettleTimeoutMs]),不是浏览器端够用的固定 700ms。
 library;
 
 import 'common.dart';
@@ -19,6 +24,18 @@ import 'video_ref.dart';
 // ---- 时间窗口常量(extension/src/content/index.ts) ----
 const int localIntentGuardMs = 1200;
 const int programmaticApplyWindowMs = 700;
+
+/// 程序化 seek 后等待播放器真正到位的上限。
+///
+/// 浏览器端 seek 几乎瞬时落地,700ms 的回声窗口够用;移动端 `seekTo()`
+/// 返回时解码往往还没跟上,位置要过 1–3s 才推进。窗口一过就恢复心跳,
+/// 播的还是 seek 前的旧位置——服务端 derivePlaybackAuthorityKind 的
+/// "位置差 ≥2.5s 即 seek" 兜底会把它当成一次新 seek,把整个房间拽回旧
+/// 进度,对端随之 seek+缓冲,再对称地把这边拽回去,形成来回抖动。
+const int programmaticSeekSettleTimeoutMs = 6000;
+
+/// 判定程序化 seek 已到位的位置容差(秒)。
+const double programmaticSeekSettleToleranceSeconds = 0.6;
 const int userGestureGraceMs = 1200;
 
 /// playback-broadcast.ts: EXPLICIT_SEEK_BROADCAST_GRACE_MS
@@ -37,6 +54,9 @@ enum LocalPlaybackEventSource {
   play,
   playing,
   pause,
+  /// 播放中断流缓冲(浏览器端的 `waiting` 事件;移动端由宿主播放器的
+  /// isBuffering 信号驱动)。
+  waiting,
   seeking,
   seeked,
   canplay,
@@ -453,6 +473,11 @@ class PlayerSyncEngine {
   num lastForcedPauseAt = 0;
   num _programmaticApplyUntil = 0;
   PlaybackPlayState? _programmaticApplyPlayState;
+
+  /// 已下发但尚未在播放器上落地的程序化 seek 目标(秒)。非空期间
+  /// 回声窗口一直有效,直到位置到位或 [_pendingProgrammaticSeekDeadline]。
+  double? _pendingProgrammaticSeekTarget;
+  num _pendingProgrammaticSeekDeadline = 0;
   num _lastLocalIntentAt = 0;
   PlaybackPlayState? _lastLocalIntentPlayState;
   PlaybackVersion? _lastAppliedVersion;
@@ -480,7 +505,14 @@ class PlayerSyncEngine {
   num _lastBroadcastAt = 0;
   int _seq = 0;
 
-  bool get isInProgrammaticApplyWindow => _nowMs() < _programmaticApplyUntil;
+  bool get isInProgrammaticApplyWindow {
+    final now = _nowMs();
+    if (now < _programmaticApplyUntil) {
+      return true;
+    }
+    return _pendingProgrammaticSeekTarget != null &&
+        now < _pendingProgrammaticSeekDeadline;
+  }
 
   void _log(String message) => log?.call(message);
 
@@ -524,6 +556,8 @@ class PlayerSyncEngine {
       return;
     }
     currentSeasonId = epId != null ? seasonId : null;
+    // 换源:旧视频的 seek 目标与新视频的位置不可比,留着会误判到位
+    _clearPendingProgrammaticSeek();
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -558,6 +592,8 @@ class PlayerSyncEngine {
     currentTitle = null;
     currentSeasonId = null;
     pendingRoomStateHydration = false;
+    // 播放器没了,等不到位置心跳确认到位,否则窗口会一直挂到超时
+    _clearPendingProgrammaticSeek();
     // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
     // 之后打开的任何视频都是手动选片,不得自动分享
     _clearSharedVideoNaturalEnd();
@@ -629,7 +665,12 @@ class PlayerSyncEngine {
   /// 位置心跳(PlPlayer 的 positionListener,约 500ms 一次):
   /// 在播且距上次广播超过 2s 才补发(playback-binding-controller.ts)。
   void onLocalPosition(LocalPlaybackSnapshot snapshot) {
+    _settleProgrammaticSeek(snapshot.positionSeconds);
     if (snapshot.playState != PlaybackPlayState.playing) {
+      return;
+    }
+    // 施加尚未落地时位置还停在旧值,广播出去会被服务端当成一次新 seek
+    if (isInProgrammaticApplyWindow) {
       return;
     }
     if (_nowMs() - _lastBroadcastAt <= timeupdateBroadcastMinIntervalMs) {
@@ -640,7 +681,7 @@ class PlayerSyncEngine {
 
   /// 用户拖动进度条(App 层从 seek UI 或非程序化 seekTo 调用)。
   void onLocalSeek(LocalPlaybackSnapshot snapshot) {
-    if (isInProgrammaticApplyWindow) {
+    if (_shouldSuppressSeekAsEcho(snapshot.positionSeconds)) {
       return;
     }
     onUserGesture(ExplicitUserActionKind.seek);
@@ -700,12 +741,61 @@ class PlayerSyncEngine {
     shareCurrentVideo();
   }
 
+  /// 位置心跳驱动的程序化 seek 到位判定:到位后收敛回常规回声窗口,
+  /// 超时后放弃等待(seek 落空/换源等),避免无限抑制本地广播。
+  void _settleProgrammaticSeek(double positionSeconds) {
+    final target = _pendingProgrammaticSeekTarget;
+    if (target == null) {
+      return;
+    }
+    final now = _nowMs();
+    if ((positionSeconds - target).abs() <=
+        programmaticSeekSettleToleranceSeconds) {
+      _pendingProgrammaticSeekTarget = null;
+      // 到位瞬间仍会回流 playing/canplay 等事件,留常规窗口盖住
+      _programmaticApplyUntil = now + programmaticApplyWindowMs;
+      _log('Programmatic seek settled at ${positionSeconds.toStringAsFixed(2)}');
+    } else if (now >= _pendingProgrammaticSeekDeadline) {
+      _pendingProgrammaticSeekTarget = null;
+      _log('Programmatic seek settle timed out at ${target.toStringAsFixed(2)}');
+    }
+  }
+
+  void _clearPendingProgrammaticSeek() {
+    _pendingProgrammaticSeekTarget = null;
+    _pendingProgrammaticSeekDeadline = 0;
+  }
+
+  /// seek 回声判定。等待程序化 seek 落地期间用户又拖了进度条时,新位置
+  /// 会明显偏离目标——那不是回声,放弃等待并按用户意图广播,否则用户的
+  /// 拖动会被最长 [programmaticSeekSettleTimeoutMs] 的窗口吞掉。
+  bool _shouldSuppressSeekAsEcho(double positionSeconds) {
+    if (!isInProgrammaticApplyWindow) {
+      return false;
+    }
+    final target = _pendingProgrammaticSeekTarget;
+    if (target != null &&
+        (positionSeconds - target).abs() >
+            programmaticSeekSettleToleranceSeconds) {
+      _clearPendingProgrammaticSeek();
+      _programmaticApplyUntil = 0;
+      return false;
+    }
+    return true;
+  }
+
   bool _shouldSuppressAsEcho(
     LocalPlaybackEventSource eventSource,
     PlaybackPlayState playState,
   ) {
     if (!isInProgrammaticApplyWindow) {
       return false;
+    }
+    // 施加引起的缓冲不上报:此时位置还停在施加前的旧值,广播出去会让
+    // 服务端按旧位置把房间打成 stop-like(authorityKind: "pause")
+    if (eventSource == LocalPlaybackEventSource.waiting) {
+      _log('Suppressed buffering echo while applying remote playback');
+      return true;
     }
     // 程序化施加窗口内、与施加目标一致的状态回流是回声
     if (_programmaticApplyPlayState == playState) {
@@ -926,6 +1016,9 @@ class PlayerSyncEngine {
       'delta=${reconcile.delta.toStringAsFixed(2)}',
     );
 
+    final willSeek =
+        reconcile.mode == PlaybackReconcileMode.softApply ||
+        reconcile.mode == PlaybackReconcileMode.hardSeek;
     await _applyProgrammatically(playback.playState, () async {
       if (lastKnownRate != null &&
           (lastKnownRate! - playback.playbackRate).abs() > 0.001) {
@@ -947,20 +1040,29 @@ class PlayerSyncEngine {
         case PlaybackPlayState.buffering:
           await port.pause();
       }
-    });
+    }, seekTarget: willSeek ? playback.currentTime : null);
   }
 
   Future<void> _applyProgrammatically(
     PlaybackPlayState targetPlayState,
-    Future<void> Function() apply,
-  ) async {
+    Future<void> Function() apply, {
+    double? seekTarget,
+  }) async {
     _programmaticApplyPlayState = targetPlayState;
     _programmaticApplyUntil = _nowMs() + programmaticApplyWindowMs;
+    // 施加期间不做到位判定:目标先记下,窗口在 apply 返回后才开始计时
+    _clearPendingProgrammaticSeek();
     try {
       await apply();
     } finally {
       // 窗口按时间自然过期,保证施加动作触发的异步事件仍被覆盖
-      _programmaticApplyUntil = _nowMs() + programmaticApplyWindowMs;
+      final now = _nowMs();
+      _programmaticApplyUntil = now + programmaticApplyWindowMs;
+      if (seekTarget != null) {
+        // seekTo() 返回不代表播放器已到位,继续等位置心跳确认
+        _pendingProgrammaticSeekTarget = seekTarget;
+        _pendingProgrammaticSeekDeadline = now + programmaticSeekSettleTimeoutMs;
+      }
     }
   }
 
@@ -1006,6 +1108,7 @@ class PlayerSyncEngine {
   void resetRoomLocalState() {
     _lastOpenedSharedUrl = null;
     pendingRoomStateHydration = false;
+    _clearPendingProgrammaticSeek();
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;

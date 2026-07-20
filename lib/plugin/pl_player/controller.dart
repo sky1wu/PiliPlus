@@ -988,6 +988,7 @@ class PlPlayerController with BlockConfigMixin {
           buffering,
           isLive,
         );
+        _notifySyncPlayBuffering(buffering);
       }),
       if (kDebugMode)
         stream.log.listen(((PlayerLog log) {
@@ -1458,6 +1459,14 @@ class PlPlayerController with BlockConfigMixin {
   static final Set<void Function(PlPlayerController player)>
   syncPlayUserToggleListeners = {};
   static final Set<VoidCallback> syncPlayPlayerDisposeListeners = {};
+  static final Set<void Function(PlPlayerController player, bool buffering)>
+  syncPlayBufferingListeners = {};
+
+  void _notifySyncPlayBuffering(bool buffering) {
+    for (final listener in Set.of(syncPlayBufferingListeners)) {
+      listener(this, buffering);
+    }
+  }
 
   void _notifySyncPlayDataSource() {
     for (final listener in Set.of(syncPlayDataSourceListeners)) {
