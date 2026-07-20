@@ -23,9 +23,10 @@ class SyncPlayService extends ChangeNotifier {
       serverUrl: serverUrl,
       displayName: _accountDisplayName,
       onChanged: _onSessionChanged,
-      onRoomState: (state) => engine.applyRoomState(state),
+      onRoomState: _onRoomState,
       onSessionEnded: (reason) {
         engine.resetRoomLocalState();
+        _resetToastState();
         SmartDialog.showToast(
           SyncPlayMessages.localizeSessionEndReason(reason),
         );
@@ -52,6 +53,10 @@ class SyncPlayService extends ChangeNotifier {
 
   final Map<String, String> _titleCache = {};
   bool _playerAttached = false;
+
+  // 房间事件 toast 的 diff 基线(对应扩展端 ToastCoordinatorState)
+  RoomState? _lastToastRoomState;
+  Map<String, num> _lastSeekToastByActor = {};
 
   bool get inRoom => session.roomCode != null;
 
@@ -82,6 +87,39 @@ class SyncPlayService extends ChangeNotifier {
     if (kDebugMode) {
       debugPrint('[sync_play] $message');
     }
+  }
+
+  /// 权威房间状态:先按施加前的引擎状态算出 toast 事件
+  /// (hydration/当前视频判定要用施加前的快照),施加后再弹出。
+  void _onRoomState(RoomState state) {
+    final sharedVideo = state.sharedVideo;
+    final normalizedSharedUrl = sharedVideo == null
+        ? null
+        : normalizeBilibiliUrl(sharedVideo.url);
+    final plan = buildRoomStateToastPlan(
+      previousState: _lastToastRoomState,
+      nextState: state,
+      localMemberId: session.memberId,
+      pendingRoomStateHydration: engine.pendingRoomStateHydration,
+      isCurrentPageShowingSharedVideo:
+          normalizedSharedUrl != null &&
+          engine.currentVideo?.normalizedUrl == normalizedSharedUrl,
+      now: DateTime.now().millisecondsSinceEpoch,
+      lastSeekToastByActor: _lastSeekToastByActor,
+    );
+    _lastToastRoomState = state;
+    _lastSeekToastByActor = plan.nextSeekToastByActor;
+
+    engine.applyRoomState(state);
+
+    for (final event in plan.events) {
+      SmartDialog.showToast(SyncPlayMessages.localizeRoomToast(event));
+    }
+  }
+
+  void _resetToastState() {
+    _lastToastRoomState = null;
+    _lastSeekToastByActor = {};
   }
 
   void _onSessionChanged() {
@@ -230,6 +268,7 @@ class SyncPlayService extends ChangeNotifier {
     player?.removeStatusLister(_onStatus);
     _playerAttached = false;
     engine.resetRoomLocalState();
+    _resetToastState();
     session.requestLeaveRoom();
   }
 

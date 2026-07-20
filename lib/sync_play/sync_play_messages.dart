@@ -26,6 +26,41 @@ abstract final class SyncPlayMessages {
 
   static String ownerSharedBy(String owner) => '由 $owner 共享';
 
+  /// i18n.ts: toast* 条目的 zh 目录,事件类型见 sync_play_core 的
+  /// [RoomToastEvent]。
+  static String localizeRoomToast(RoomToastEvent event) => switch (event) {
+    MemberJoinedToast(:final name) => '$name 加入了房间',
+    MemberLeftToast(:final name) => '$name 离开了房间',
+    StartedPlayingToast(:final name) => '$name 开始播放',
+    PausedVideoToast(:final name) => '$name 暂停了视频',
+    SwitchedRateToast(:final name, :final rate) =>
+      '$name 切换到 ${_formatPlaybackRate(rate)}',
+    SeekedToToast(:final name, :final seconds) =>
+      '$name 跳转到 ${_formatToastTime(seconds)}',
+    SharedNewVideoToast(:final name, :final title) => '$name 共享了新视频：$title',
+  };
+
+  /// content/toast.ts: formatToastTime
+  static String _formatToastTime(double seconds) {
+    final totalSeconds = seconds.isFinite && seconds > 0 ? seconds.floor() : 0;
+    final mins = totalSeconds ~/ 60;
+    final secs = totalSeconds % 60;
+    return '$mins:${secs.toString().padLeft(2, '0')}';
+  }
+
+  /// content/toast.ts: formatPlaybackRate
+  static String _formatPlaybackRate(double rate) {
+    final rounded = (rate * 100).round() / 100;
+    if (rounded == rounded.roundToDouble()) {
+      return '${rounded.toStringAsFixed(0)}x';
+    }
+    final trimmed = rounded
+        .toStringAsFixed(2)
+        .replaceFirst(RegExp(r'0+$'), '')
+        .replaceFirst(RegExp(r'\.$'), '');
+    return '${trimmed}x';
+  }
+
   static String memberSelf(String name) => '我 ($name)';
 
   static String membersCount(int count) => '$count人';
