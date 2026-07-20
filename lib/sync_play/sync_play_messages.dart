@@ -25,7 +25,27 @@ abstract final class SyncPlayMessages {
   static const String connectionServerUnreachable = '无法连接到同步服务器。';
   static const String connectionLostReconnecting = '与同步服务器的连接已断开，正在尝试重连。';
 
+  // ---- 高级设置区(popup-template.ts 的 popup-section-advanced) ----
+  static const String sectionAdvancedInfo = '高级设置';
+  static const String actionSave = '保存';
+  static const String metricCurrentIdentity = '当前身份';
+  static const String metricReconnectCountdown = '重连倒计时';
+  static const String metricClockSync = '时钟校准';
+  static const String metricClockOffset = '偏移';
+  static const String metricClockRtt = 'RTT';
+  static const String metricClockHelp = '偏移表示本地时间与房间时间差，RTT 表示网络往返延迟。';
+  static const String serverUrlSaved = '服务器地址已保存'; // 扩展无此提示,移动端补充
+  static const String metricPlaceholder = '-';
+
   static String ownerSharedBy(String owner) => '由 $owner 共享';
+
+  /// i18n.ts: retrySeconds
+  static String retrySeconds(int seconds) => '$seconds 秒';
+
+  /// popup-render.ts: formatClockMetricValue。移动端取整显示(double 原样
+  /// 会打印十几位小数)。
+  static String clockMetricValue(double? valueMs) =>
+      valueMs == null ? metricPlaceholder : '${valueMs.round()}ms';
 
   /// i18n.ts: toast* 条目的 zh 目录,事件类型见 sync_play_core 的
   /// [RoomToastEvent]。

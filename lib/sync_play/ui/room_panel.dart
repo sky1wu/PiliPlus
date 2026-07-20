@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:PiliPlus/sync_play/sync_play_messages.dart';
 import 'package:PiliPlus/sync_play/sync_play_service.dart';
 import 'package:flutter/material.dart';
@@ -34,17 +36,46 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
   final TextEditingController _inviteCtrl = TextEditingController();
   bool _busy = false;
 
+  /// 服务器地址收在高级设置里(对齐扩展端 popup):尚未配置时默认展开,
+  /// 否则新用户找不到必填项。
+  late final bool _advancedInitiallyExpanded;
+
+  /// 重连倒计时每秒走字,展开高级设置期间才需要刷新。
+  Timer? _retryTicker;
+
   @override
   void initState() {
     super.initState();
     _serverCtrl = TextEditingController(text: service.serverUrl);
+    _advancedInitiallyExpanded = service.serverUrl.isEmpty;
+    if (_advancedInitiallyExpanded) {
+      _startRetryTicker();
+    }
   }
 
   @override
   void dispose() {
+    _retryTicker?.cancel();
     _serverCtrl.dispose();
     _inviteCtrl.dispose();
     super.dispose();
+  }
+
+  void _startRetryTicker() {
+    _retryTicker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  void _onAdvancedExpansionChanged(bool expanded) {
+    if (expanded) {
+      _startRetryTicker();
+    } else {
+      _retryTicker?.cancel();
+      _retryTicker = null;
+    }
   }
 
   bool _saveConnectionFields() {
@@ -55,6 +86,12 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
     }
     service.setServerUrl(server);
     return true;
+  }
+
+  void _saveServerUrl() {
+    if (_saveConnectionFields()) {
+      SmartDialog.showToast(SyncPlayMessages.serverUrlSaved);
+    }
   }
 
   Future<void> _createRoom() async {
@@ -137,6 +174,8 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
                 ..._buildOutOfRoom(context)
               else
                 ..._buildInRoom(context, session),
+              const Divider(height: 24),
+              _buildAdvanced(context, session),
             ],
           ),
         );
@@ -145,16 +184,6 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
   }
 
   List<Widget> _buildOutOfRoom(BuildContext context) => [
-    TextField(
-      controller: _serverCtrl,
-      decoration: const InputDecoration(
-        labelText: SyncPlayMessages.serverUrlLabel,
-        hintText: 'wss://your-syncplay-server/ws',
-        isDense: true,
-      ),
-      keyboardType: TextInputType.url,
-    ),
-    const SizedBox(height: 12),
     FilledButton.icon(
       onPressed: _busy ? null : _createRoom,
       icon: const Icon(Icons.add),
@@ -281,6 +310,114 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
         label: const Text(SyncPlayMessages.actionLeave),
       ),
     ];
+  }
+
+  /// 高级设置(popup-template.ts 的 popup-section-advanced):服务器地址
+  /// 与连接诊断。调试日志区 v1 不做(日志只走 debugPrint)。
+  Widget _buildAdvanced(BuildContext context, SyncPlayRoomSession session) {
+    final theme = Theme.of(context);
+    final retryIn = session.retryIn;
+    return Theme(
+      // 去掉 ExpansionTile 展开时的默认分隔线,与面板其余部分统一
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        initiallyExpanded: _advancedInitiallyExpanded,
+        onExpansionChanged: _onAdvancedExpansionChanged,
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+        title: Text(
+          SyncPlayMessages.sectionAdvancedInfo,
+          style: theme.textTheme.labelLarge,
+        ),
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _serverCtrl,
+                  decoration: const InputDecoration(
+                    labelText: SyncPlayMessages.serverUrlLabel,
+                    hintText: 'wss://your-syncplay-server/ws',
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.url,
+                  onSubmitted: (_) => _saveServerUrl(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _saveServerUrl,
+                child: const Text(SyncPlayMessages.actionSave),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _MetricRow(
+            label: SyncPlayMessages.metricCurrentIdentity,
+            value: session.memberId ?? SyncPlayMessages.metricPlaceholder,
+          ),
+          _MetricRow(
+            label: SyncPlayMessages.metricReconnectCountdown,
+            value: retryIn == null
+                ? SyncPlayMessages.metricPlaceholder
+                : SyncPlayMessages.retrySeconds(
+                    (retryIn.inMilliseconds / 1000).ceil(),
+                  ),
+          ),
+          _MetricRow(
+            label: SyncPlayMessages.metricClockSync,
+            value:
+                '${SyncPlayMessages.metricClockOffset} '
+                '${SyncPlayMessages.clockMetricValue(session.clockOffsetMs)}'
+                '   ${SyncPlayMessages.metricClockRtt} '
+                '${SyncPlayMessages.clockMetricValue(session.rttMs)}',
+          ),
+          const SizedBox(height: 4),
+          Text(
+            SyncPlayMessages.metricClockHelp,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricRow extends StatelessWidget {
+  const _MetricRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.end,
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
