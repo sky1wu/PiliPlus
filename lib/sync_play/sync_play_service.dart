@@ -278,6 +278,19 @@ class SyncPlayService extends ChangeNotifier {
   }
 
   LocalPlaybackSnapshot _snapshot({double? positionSeconds}) {
+    // 未起播的详情页不能读 PlPlayerController:它是跨页复用的单例,且
+    // VideoDetailController 的字段初始化器(controller.dart:124)在页面
+    // 一构造就把它建好了,所以 instance 非空但内容还是上一个视频的残留
+    // ——playerStatus 可能是 playing,isBuffering 默认就是 true,映射出来
+    // 就成了 buffering@0。把那个状态分享出去,跟随端会当成"对端在缓冲"
+    // 而永远不施加暂停,自己一路播下去。
+    if (!_playerAttached) {
+      return (
+        positionSeconds: positionSeconds ?? 0,
+        playState: PlaybackPlayState.paused,
+        playbackRate: 1.0,
+      );
+    }
     final player = PlPlayerController.instance;
     return (
       positionSeconds:

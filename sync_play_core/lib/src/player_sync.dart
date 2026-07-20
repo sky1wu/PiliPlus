@@ -1070,11 +1070,12 @@ class PlayerSyncEngine {
       _deferRemotePause(playback);
       return;
     }
+    final hydrating = pendingRoomStateHydration;
     pendingRoomStateHydration = false;
     // 有更新的状态要施加:待施加的暂停已被取代,丢弃
     // (_lastAppliedVersion 已推进,更旧的状态在上面就被判 stale 了)
     _clearDeferredRemotePause();
-    await _applyRemotePlayback(playback);
+    await _applyRemotePlayback(playback, hydrating: hydrating);
   }
 
   /// room-state-apply-controller.ts 的远端 pause 去抖判定。
@@ -1096,8 +1097,9 @@ class PlayerSyncEngine {
         if (pending == null) {
           return;
         }
+        final wasHydrating = pendingRoomStateHydration;
         pendingRoomStateHydration = false;
-        _applyRemotePlayback(pending).ignore();
+        _applyRemotePlayback(pending, hydrating: wasHydrating).ignore();
       },
     );
   }
@@ -1108,15 +1110,30 @@ class PlayerSyncEngine {
     _deferredRemotePause = null;
   }
 
-  Future<void> _applyRemotePlayback(PlaybackState playback) async {
-    // 移动端专属:对端在缓冲时,它的 currentTime 按定义是冻结的过期值,
-    // 不是可用的对齐目标。而非 playing 状态的对齐阈值只有 0.15s,照做
-    // 就会 seek 到那个冻结位置 —— 移动端一次 seek 就是一轮缓冲,本地随即
-    // 广播自己的冻结位置,对端恢复后再把我们拽回去,两端锁死在同一小段
-    // 反复重播。浏览器端 seek 近乎瞬时才承受得起这种对齐。
-    //
-    // 保持现状即可:对端缓冲结束会广播新的 playing 状态,那时再对齐。
+  Future<void> _applyRemotePlayback(
+    PlaybackState playback, {
+    bool hydrating = false,
+  }) async {
     if (playback.playState == PlaybackPlayState.buffering) {
+      if (hydrating) {
+        // 首个权威状态就是 buffering:房间还没真正开始播,本地必须停住。
+        // 跟随导航是强制 autoPlay 的,这里不停就会一路播下去,而且
+        // hydration 一清广播守卫就失效,本地的 playing 会翻掉房间状态。
+        // 位置仍然不对齐(理由见下),只停播放。
+        _log('Pausing on buffering initial room state');
+        await _applyProgrammatically(
+          PlaybackPlayState.paused,
+          () => port.pause(),
+        );
+        return;
+      }
+      // 移动端专属:稳态下对端缓冲时,它的 currentTime 按定义是冻结的过期
+      // 值,不是可用的对齐目标。而非 playing 状态的对齐阈值只有 0.15s,
+      // 照做就会 seek 到那个冻结位置 —— 移动端一次 seek 就是一轮缓冲,本地
+      // 随即广播自己的冻结位置,对端恢复后再把我们拽回去,两端锁死在同一
+      // 小段反复重播。浏览器端 seek 近乎瞬时才承受得起这种对齐。
+      //
+      // 保持现状即可:对端缓冲结束会广播新的 playing 状态,那时再对齐。
       _log('Holding position: remote actor is buffering');
       return;
     }

@@ -583,6 +583,30 @@ void main() {
       expect(harness.port.calls, isEmpty);
     });
 
+    test('pauses on a buffering initial room state', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.lastKnownPositionSeconds = 0;
+      harness.engine.lastKnownRate = 1;
+      expect(harness.engine.pendingRoomStateHydration, isTrue);
+
+      // 分享端未起播时发出的就是这个形状(单例残留导致的 buffering@0)。
+      // 跟随端是强制 autoPlay 起播的,这里不停就会一路播下去。
+      final state = roomState(
+        playback: playback(
+          currentTime: 0,
+          playState: PlaybackPlayState.buffering,
+          seq: 5,
+        ),
+      );
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      expect(harness.port.calls, ['pause']);
+      // 位置仍然不对齐:缓冲中的 currentTime 不是可用目标
+      expect(harness.port.calls.join(), isNot(contains('seekTo')));
+    });
+
     test('keeps hydration held while a remote pause is deferred', () async {
       final harness = EngineHarness();
       harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
