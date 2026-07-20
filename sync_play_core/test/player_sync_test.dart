@@ -17,11 +17,13 @@ PlaybackState playback({
   num serverTime = 1000,
   String actorId = 'member-2',
   num seq = 1,
+  bool? userInitiated,
 }) => PlaybackState(
   url: url,
   currentTime: currentTime,
   playState: playState,
   syncIntent: syncIntent,
+  userInitiated: userInitiated,
   playbackRate: playbackRate,
   updatedAt: serverTime,
   serverTime: serverTime,
@@ -93,15 +95,51 @@ class FakePort implements SyncPlayPlayerPort {
   );
 }
 
+class DeferredTask {
+  DeferredTask(this.delay, this.task);
+
+  final Duration delay;
+  final void Function() task;
+  bool cancelled = false;
+}
+
 class EngineHarness {
   EngineHarness() {
-    engine = PlayerSyncEngine(session: session, port: port, nowMs: () => now);
+    engine = PlayerSyncEngine(
+      session: session,
+      port: port,
+      nowMs: () => now,
+      scheduleDelayed: (delay, task) {
+        final entry = DeferredTask(delay, task);
+        deferred.add(entry);
+        return () => entry.cancelled = true;
+      },
+    );
   }
 
   final session = FakeSession();
   final port = FakePort();
   num now = 100000;
   late final PlayerSyncEngine engine;
+
+  /// 引擎登记的延迟任务(远端 pause 去抖),由测试手动触发。
+  final List<DeferredTask> deferred = [];
+
+  /// 触发所有未取消的到期任务,返回实际执行的个数。
+  Future<int> fireDeferred() async {
+    var fired = 0;
+    for (final entry in List.of(deferred)) {
+      if (entry.cancelled) {
+        continue;
+      }
+      entry.task();
+      fired++;
+    }
+    deferred.clear();
+    // 施加是 async 的,让出一拍等它跑完
+    await Future<void>.delayed(Duration.zero);
+    return fired;
+  }
 
   LocalPlaybackSnapshot snapshot({
     double position = 30,
@@ -400,6 +438,101 @@ void main() {
         expect(harness.session.playbackUpdates, hasLength(1));
       },
     );
+
+    test('remote buffering aligns position without pausing locally', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 对端在缓冲:只对齐进度,绝不能把本地拉停
+      final state = roomState(
+        playback: playback(
+          currentTime: 45,
+          playState: PlaybackPlayState.buffering,
+          seq: 5,
+        ),
+      );
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      expect(harness.port.calls, ['seekTo:45.0']);
+      expect(harness.port.calls, isNot(contains('pause')));
+    });
+
+    test('defers remote pause, dropping it when superseded', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 缓冲抖动产生的瞬时 paused(非用户主动):不得立即施加
+      final paused = roomState(
+        playback: playback(
+          currentTime: 30,
+          playState: PlaybackPlayState.paused,
+          seq: 5,
+        ),
+      );
+      harness.session.roomState = paused;
+      await harness.engine.applyRoomState(paused);
+      expect(harness.port.calls, isEmpty);
+      expect(harness.deferred, hasLength(1));
+
+      // 250ms 内对端恢复播放:待施加的暂停整个作废
+      final resumed = roomState(
+        playback: playback(
+          currentTime: 30.2,
+          playState: PlaybackPlayState.playing,
+          seq: 6,
+        ),
+      );
+      harness.session.roomState = resumed;
+      await harness.engine.applyRoomState(resumed);
+      expect(harness.port.calls, ['play']);
+
+      expect(await harness.fireDeferred(), 0);
+      expect(harness.port.calls, isNot(contains('pause')));
+    });
+
+    test('applies a deferred remote pause when nothing supersedes', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      final paused = roomState(
+        playback: playback(
+          currentTime: 30,
+          playState: PlaybackPlayState.paused,
+          seq: 5,
+        ),
+      );
+      harness.session.roomState = paused;
+      await harness.engine.applyRoomState(paused);
+      expect(harness.port.calls, isEmpty);
+
+      expect(await harness.fireDeferred(), 1);
+      expect(harness.port.calls, contains('pause'));
+    });
+
+    test('applies a user-initiated remote pause immediately', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 用户主动暂停走快速通道,不吃 250ms 可见延迟
+      final paused = roomState(
+        playback: playback(
+          currentTime: 30,
+          playState: PlaybackPlayState.paused,
+          seq: 5,
+          userInitiated: true,
+        ),
+      );
+      harness.session.roomState = paused;
+      await harness.engine.applyRoomState(paused);
+
+      expect(harness.port.calls, contains('pause'));
+      expect(harness.deferred, isEmpty);
+    });
 
     test('broadcasts buffering as a stop-like state', () async {
       final harness = EngineHarness();

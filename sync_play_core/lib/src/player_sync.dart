@@ -7,7 +7,6 @@
 /// - 无 soft-apply 速率追赶(soft-apply-controller.ts 430 行):reconcile 的
 ///   `rateOnly` 档按 ignore 处理(0.45–0.9s 漂移容忍,等下一拍),
 ///   `softApply` 档按 hardSeek 处理;
-/// - 无远端 pause 防闪抖 debounce(REMOTE_PAUSE_DEBOUNCE_MS):直接施加;
 /// - 无 buffer-pause 升级分类:宿主播放器(PlPlayer)有独立 buffering 信号,
 ///   由桥接层映射成 `buffering` 播放态与 `waiting` 事件源传入;
 /// - 无 festival/watchlater 特例:App 内路由不存在该形态。
@@ -16,6 +15,8 @@
 /// - 程序化 seek 的回声窗口按"位置真正到位"关闭(见
 ///   [programmaticSeekSettleTimeoutMs]),不是浏览器端够用的固定 700ms。
 library;
+
+import 'dart:async';
 
 import 'common.dart';
 import 'models.dart';
@@ -36,6 +37,14 @@ const int programmaticSeekSettleTimeoutMs = 6000;
 
 /// 判定程序化 seek 已到位的位置容差(秒)。
 const double programmaticSeekSettleToleranceSeconds = 0.6;
+
+/// index.ts: REMOTE_PAUSE_DEBOUNCE_MS
+///
+/// 远端 paused 延迟这么久再施加。缓冲抖动、状态回声都会瞬时产生 paused,
+/// 立刻施加会把本地拉停;延迟期间被更新的状态取代就整个丢弃。用户主动
+/// 暂停(userInitiated)走快速通道立即施加,不吃这 250ms 可见延迟。
+const int remotePauseDebounceMs = 250;
+
 const int userGestureGraceMs = 1200;
 
 /// playback-broadcast.ts: EXPLICIT_SEEK_BROADCAST_GRACE_MS
@@ -48,6 +57,15 @@ const int timeupdateBroadcastMinIntervalMs = 2000;
 /// 共享视频自然播完后,多久之内加载的新视频才算"连播"
 /// (extension/src/content/index.ts: INITIAL_ROOM_STATE_PAUSE_HOLD_MS)。
 const int autoplayContinuationWindowMs = 3000;
+
+/// 延迟执行钩子,返回取消函数。测试注入假实现以免依赖真实时钟。
+typedef SyncPlayDelayScheduler =
+    void Function() Function(Duration delay, void Function() task);
+
+void Function() _defaultDelayScheduler(Duration delay, void Function() task) {
+  final timer = Timer(delay, task);
+  return timer.cancel;
+}
 
 /// 本地播放事件来源(runtime-state.ts: LocalPlaybackEventSource 的移动端子集)。
 enum LocalPlaybackEventSource {
@@ -451,12 +469,15 @@ class PlayerSyncEngine {
     required this.session,
     required this.port,
     num Function()? nowMs,
+    SyncPlayDelayScheduler? scheduleDelayed,
     this.log,
-  }) : _nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch);
+  }) : _nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch),
+       _scheduleDelayed = scheduleDelayed ?? _defaultDelayScheduler;
 
   final PlayerSyncSessionApi session;
   final SyncPlayPlayerPort port;
   final num Function() _nowMs;
+  final SyncPlayDelayScheduler _scheduleDelayed;
   void Function(String message)? log;
 
   BilibiliVideoRef? currentVideo;
@@ -478,6 +499,10 @@ class PlayerSyncEngine {
   /// 回声窗口一直有效,直到位置到位或 [_pendingProgrammaticSeekDeadline]。
   double? _pendingProgrammaticSeekTarget;
   num _pendingProgrammaticSeekDeadline = 0;
+
+  /// 去抖中、尚未施加的远端暂停(见 [remotePauseDebounceMs])。
+  PlaybackState? _deferredRemotePause;
+  void Function()? _cancelDeferredRemotePause;
   num _lastLocalIntentAt = 0;
   PlaybackPlayState? _lastLocalIntentPlayState;
   PlaybackVersion? _lastAppliedVersion;
@@ -558,6 +583,7 @@ class PlayerSyncEngine {
     currentSeasonId = epId != null ? seasonId : null;
     // 换源:旧视频的 seek 目标与新视频的位置不可比,留着会误判到位
     _clearPendingProgrammaticSeek();
+    _clearDeferredRemotePause();
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -594,6 +620,7 @@ class PlayerSyncEngine {
     pendingRoomStateHydration = false;
     // 播放器没了,等不到位置心跳确认到位,否则窗口会一直挂到超时
     _clearPendingProgrammaticSeek();
+    _clearDeferredRemotePause();
     // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
     // 之后打开的任何视频都是手动选片,不得自动分享
     _clearSharedVideoNaturalEnd();
@@ -994,7 +1021,44 @@ class PlayerSyncEngine {
       // 自己的状态回流:只推进版本号,不施加
       return;
     }
+    if (_shouldDeferRemotePause(playback)) {
+      _deferRemotePause(playback);
+      return;
+    }
+    // 有更新的状态要施加:待施加的暂停已被取代,丢弃
+    // (_lastAppliedVersion 已推进,更旧的状态在上面就被判 stale 了)
+    _clearDeferredRemotePause();
     await _applyRemotePlayback(playback);
+  }
+
+  /// room-state-apply-controller.ts 的远端 pause 去抖判定。
+  /// 只针对 paused:buffering 不再走暂停路径(见 [_applyRemotePlayback])。
+  bool _shouldDeferRemotePause(PlaybackState playback) =>
+      playback.playState == PlaybackPlayState.paused &&
+      playback.userInitiated != true;
+
+  void _deferRemotePause(PlaybackState playback) {
+    _cancelDeferredRemotePause?.call();
+    _deferredRemotePause = playback;
+    _log('Deferred remote paused seq=${playback.seq} for ${remotePauseDebounceMs}ms');
+    _cancelDeferredRemotePause = _scheduleDelayed(
+      const Duration(milliseconds: remotePauseDebounceMs),
+      () {
+        _cancelDeferredRemotePause = null;
+        final pending = _deferredRemotePause;
+        _deferredRemotePause = null;
+        if (pending == null) {
+          return;
+        }
+        _applyRemotePlayback(pending).ignore();
+      },
+    );
+  }
+
+  void _clearDeferredRemotePause() {
+    _cancelDeferredRemotePause?.call();
+    _cancelDeferredRemotePause = null;
+    _deferredRemotePause = null;
   }
 
   Future<void> _applyRemotePlayback(PlaybackState playback) async {
@@ -1036,8 +1100,12 @@ class PlayerSyncEngine {
       switch (playback.playState) {
         case PlaybackPlayState.playing:
           await port.play();
-        case PlaybackPlayState.paused:
         case PlaybackPlayState.buffering:
+          // 对端在缓冲:只对齐进度,不动本地播放状态
+          // (player-binding.ts applyPlaybackToVideo 对 buffering 直接返回)。
+          // 合并进 paused 分支会让对端每次重新缓冲都把本地拉停。
+          break;
+        case PlaybackPlayState.paused:
           await port.pause();
       }
     }, seekTarget: willSeek ? playback.currentTime : null);
@@ -1109,6 +1177,7 @@ class PlayerSyncEngine {
     _lastOpenedSharedUrl = null;
     pendingRoomStateHydration = false;
     _clearPendingProgrammaticSeek();
+    _clearDeferredRemotePause();
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;
