@@ -14,6 +14,7 @@ import 'package:PiliPlus/common/widgets/scroll_physics.dart';
 import 'package:PiliPlus/common/widgets/sliver/video_header.dart';
 import 'package:PiliPlus/common/widgets/svg/play_icon.dart';
 import 'package:PiliPlus/models/common/episode_panel_type.dart';
+import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models_new/pgc/pgc_info_model/result.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
@@ -50,6 +51,7 @@ import 'package:PiliPlus/plugin/pl_player/view/view.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService;
+import 'package:PiliPlus/sync_play/sync_play_service.dart';
 import 'package:PiliPlus/sync_play/ui/sync_play_entry.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
@@ -174,7 +176,27 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       plPlayerController!
         ..addStatusLister(playerListener)
         ..addPositionListener(positionListener);
+    } else {
+      _attachSyncPlayPageVideo();
     }
+  }
+
+  /// 关闭自动播放时页面只显示封面、播放器不建立,SyncPlay 的 dataSource
+  /// 钩子拿不到当前视频。先登记一份,封面上的一起看入口才能直接分享。
+  void _attachSyncPlayPageVideo() {
+    final controller = videoDetailController;
+    // v1 边界与 SyncPlayService._isSyncableVideo 一致:仅普通视频与番剧
+    if (controller.isFileSource || controller.videoType == VideoType.pugv) {
+      return;
+    }
+    final isPgc = controller.videoType == VideoType.pgc;
+    final cid = controller.cid.value;
+    SyncPlayService.to.attachPageVideo(
+      bvid: controller.bvid,
+      cid: cid > 0 ? cid : null,
+      epId: isPgc ? controller.epId : null,
+      seasonId: isPgc ? controller.seasonId : null,
+    );
   }
 
   void positionListener(Duration position) {
@@ -353,6 +375,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       } else {
         PlPlayerController.updatePlayCount();
       }
+    }
+    if (plPlayerController == null) {
+      // 始终未起播:没有播放器 dispose 钩子来清 SyncPlay 的视频上下文
+      SyncPlayService.to.detachPageVideo();
     }
     removeObserverMobile(this);
 

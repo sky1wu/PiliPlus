@@ -56,6 +56,10 @@ class SyncPlayService extends ChangeNotifier {
   final Map<String, String> _titleCache = {};
   bool _playerAttached = false;
 
+  /// 当前登记视频的 bvid。未起播时没有播放器实例可问,分享前补标题
+  /// ([_ensureTitle])要靠它。
+  String? _currentBvid;
+
   // 房间事件 toast 的 diff 基线(对应扩展端 ToastCoordinatorState)
   RoomState? _lastToastRoomState;
   Map<String, num> _lastSeekToastByActor = {};
@@ -165,11 +169,54 @@ class SyncPlayService extends ChangeNotifier {
       ..addStatusLister(_onStatus);
     _playerAttached = true;
 
-    engine.onVideoLoaded(
+    _loadVideo(
       bvid: bvid,
       cid: cid,
       epId: isPgc ? epid : null,
       seasonId: isPgc ? player.seasonIdOrNull : null,
+    );
+  }
+
+  /// 视频详情页在起播前登记当前视频。
+  ///
+  /// 播放器实例要到起播才建立(关闭自动播放时页面只显示封面),只靠
+  /// dataSource 钩子的话未开播期间 engine.currentVideo 一直是空,点分享
+  /// 会误报"当前页面没有可播放的视频"。不要求已在房间:用户可能正是在
+  /// 这个页面上打开面板建房/进房的。
+  void attachPageVideo({
+    String? bvid,
+    int? cid,
+    int? epId,
+    int? seasonId,
+  }) {
+    if (epId == null && (bvid == null || cid == null)) {
+      return;
+    }
+    _loadVideo(bvid: bvid, cid: cid, epId: epId, seasonId: seasonId);
+  }
+
+  /// 视频详情页销毁且始终未起播时清除登记。起播过的走播放器 dispose
+  /// 钩子([_onPlayerDisposed]),不会走到这里。
+  void detachPageVideo() {
+    if (_playerAttached) {
+      return;
+    }
+    _currentBvid = null;
+    engine.onPlayerDetached();
+  }
+
+  void _loadVideo({
+    String? bvid,
+    int? cid,
+    int? epId,
+    int? seasonId,
+  }) {
+    _currentBvid = bvid;
+    engine.onVideoLoaded(
+      bvid: bvid,
+      cid: cid,
+      epId: epId,
+      seasonId: seasonId,
       title: bvid == null ? null : _titleCache[bvid],
     );
     // 番剧集的 bvid 同样能换取集标题(x/web-interface/view 支持)
@@ -177,7 +224,9 @@ class SyncPlayService extends ChangeNotifier {
       _fetchTitle(bvid);
     }
     // 拉一次权威房间状态:处理跟随切页后的进度/暂停施加
-    session.requestSync();
+    if (inRoom) {
+      session.requestSync();
+    }
   }
 
   Future<void> _fetchTitle(String bvid) async {
@@ -202,7 +251,8 @@ class SyncPlayService extends ChangeNotifier {
     if (engine.currentTitle != null) {
       return;
     }
-    final bvid = PlPlayerController.instance?.bvidOrNull;
+    // 未起播时没有播放器实例,回落到登记视频时记下的 bvid
+    final bvid = PlPlayerController.instance?.bvidOrNull ?? _currentBvid;
     if (bvid == null) {
       return;
     }
@@ -296,6 +346,7 @@ class SyncPlayService extends ChangeNotifier {
   /// 后续收到新共享 URL 时才能正确触发跟随导航。
   void _onPlayerDisposed() {
     _playerAttached = false;
+    _currentBvid = null;
     engine.onPlayerDetached();
   }
 
