@@ -12,7 +12,10 @@
 /// - 程序化 seek 的回声窗口按"位置真正到位"关闭(见
 ///   [programmaticSeekSettleTimeoutMs]),不是浏览器端够用的固定 700ms;
 /// - soft-apply 追平期间本地开始缓冲即放弃追平(浏览器端没有这一档:
-///   那边 seek 近乎瞬时,不存在"追平时播不动"的情况)。
+///   那边 seek 近乎瞬时,不存在"追平时播不动"的情况);
+/// - 远端处于 buffering 时完全不对齐进度(浏览器端会 seek 过去):
+///   缓冲中的 currentTime 是冻结值,移动端照做会让两端互相拽回、
+///   锁死在同一小段(见 [_applyRemotePlayback])。
 library;
 
 import 'dart:async';
@@ -1052,17 +1055,22 @@ class PlayerSyncEngine {
     if (decision is! ApplyPlayback) {
       return;
     }
-    pendingRoomStateHydration = false;
     final playback = decision.playback;
     _lastAppliedVersion = (serverTime: playback.serverTime, seq: playback.seq);
     if (decision.isSelfPlayback) {
       // 自己的状态回流:只推进版本号,不施加
+      pendingRoomStateHydration = false;
       return;
     }
     if (_shouldDeferRemotePause(playback)) {
+      // hydration 有意保持 true 到延迟的快照真正施加为止
+      // (room-state-apply-controller.ts 同一处的注释):否则这 250ms 里
+      // 本地播放器的状态会绕过广播守卫播出去。跟随导航是强制 autoPlay 的,
+      // 那正好会把房间的"暂停"翻成"播放"。
       _deferRemotePause(playback);
       return;
     }
+    pendingRoomStateHydration = false;
     // 有更新的状态要施加:待施加的暂停已被取代,丢弃
     // (_lastAppliedVersion 已推进,更旧的状态在上面就被判 stale 了)
     _clearDeferredRemotePause();
@@ -1088,6 +1096,7 @@ class PlayerSyncEngine {
         if (pending == null) {
           return;
         }
+        pendingRoomStateHydration = false;
         _applyRemotePlayback(pending).ignore();
       },
     );
@@ -1100,6 +1109,18 @@ class PlayerSyncEngine {
   }
 
   Future<void> _applyRemotePlayback(PlaybackState playback) async {
+    // 移动端专属:对端在缓冲时,它的 currentTime 按定义是冻结的过期值,
+    // 不是可用的对齐目标。而非 playing 状态的对齐阈值只有 0.15s,照做
+    // 就会 seek 到那个冻结位置 —— 移动端一次 seek 就是一轮缓冲,本地随即
+    // 广播自己的冻结位置,对端恢复后再把我们拽回去,两端锁死在同一小段
+    // 反复重播。浏览器端 seek 近乎瞬时才承受得起这种对齐。
+    //
+    // 保持现状即可:对端缓冲结束会广播新的 playing 状态,那时再对齐。
+    if (playback.playState == PlaybackPlayState.buffering) {
+      _log('Holding position: remote actor is buffering');
+      return;
+    }
+
     // v1 简化:施加时以远端快照的 currentTime 为目标,本地当前位置由
     // App 桥接层在调用前写入 lastKnownPosition。
     final localSeconds = lastKnownPositionSeconds ?? 0;
@@ -1169,9 +1190,7 @@ class PlayerSyncEngine {
         case PlaybackPlayState.playing:
           await port.play();
         case PlaybackPlayState.buffering:
-          // 对端在缓冲:只对齐进度,不动本地播放状态
-          // (player-binding.ts applyPlaybackToVideo 对 buffering 直接返回)。
-          // 合并进 paused 分支会让对端每次重新缓冲都把本地拉停。
+          // 上面已提前返回,这里到不了
           break;
         case PlaybackPlayState.paused:
           await port.pause();

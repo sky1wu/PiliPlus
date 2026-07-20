@@ -563,12 +563,13 @@ void main() {
       expect(harness.session.playbackUpdates, isEmpty);
     });
 
-    test('remote buffering aligns position without pausing locally', () async {
+    test('remote buffering touches nothing at all', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
       harness.engine.lastKnownPositionSeconds = 30;
 
-      // 对端在缓冲:只对齐进度,绝不能把本地拉停
+      // 对端缓冲中,它的位置是冻结的过期值:既不能拉停本地,也不能
+      // 拿它当对齐目标 —— seek 过去会让两端互相拽回、锁死在一小段
       final state = roomState(
         playback: playback(
           currentTime: 45,
@@ -579,8 +580,41 @@ void main() {
       harness.session.roomState = state;
       await harness.engine.applyRoomState(state);
 
-      expect(harness.port.calls, ['seekTo:45.0']);
-      expect(harness.port.calls, isNot(contains('pause')));
+      expect(harness.port.calls, isEmpty);
+    });
+
+    test('keeps hydration held while a remote pause is deferred', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.lastKnownPositionSeconds = 0;
+      harness.engine.lastKnownRate = 1;
+      expect(harness.engine.pendingRoomStateHydration, isTrue);
+
+      // 分享端未开播:房间状态是 paused@0
+      final state = roomState(
+        playback: playback(
+          currentTime: 0,
+          playState: PlaybackPlayState.paused,
+          seq: 5,
+        ),
+      );
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      // 去抖这 250ms 内 hydration 必须仍然成立,否则跟随导航强制 autoPlay
+      // 起播后会把自己的 playing 播出去,把房间从暂停翻成播放
+      expect(harness.engine.pendingRoomStateHydration, isTrue);
+      harness.now += userGestureGraceMs + 100;
+      harness.engine.onLocalPlayStateChanged(
+        LocalPlaybackEventSource.playing,
+        harness.snapshot(position: 0),
+      );
+      expect(harness.session.playbackUpdates, isEmpty);
+
+      // 延迟的快照落地才算 hydration 完成
+      expect(await harness.fireDeferred(), 1);
+      expect(harness.engine.pendingRoomStateHydration, isFalse);
+      expect(harness.port.calls, contains('pause'));
     });
 
     test('defers remote pause, dropping it when superseded', () async {
