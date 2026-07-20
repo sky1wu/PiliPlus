@@ -652,6 +652,7 @@ abstract final class PageUtils {
     dynamic seasonId,
     dynamic epId,
     int? progress, // milliseconds
+    Map? extraArguments,
     bool off = false,
   }) async {
     try {
@@ -676,6 +677,7 @@ abstract final class PageUtils {
             extraArguments: {
               'pgcApi': true,
               'pgcItem': response,
+              ...?extraArguments,
             },
             off: off,
           );
@@ -725,6 +727,7 @@ abstract final class PageUtils {
             progress: progress,
             extraArguments: {
               'pgcItem': response,
+              ...?extraArguments,
             },
             off: off,
           );

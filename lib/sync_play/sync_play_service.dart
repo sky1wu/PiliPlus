@@ -122,11 +122,17 @@ class SyncPlayService extends ChangeNotifier {
     _lastSeekToastByActor = {};
   }
 
+  /// v1 边界:普通视频与番剧参与同步(直播/课堂不挂)。
+  static bool _isSyncableVideo(PlPlayerController player) =>
+      !player.isLive &&
+      (player.videoType == VideoType.ugc ||
+          player.videoType == VideoType.pgc);
+
   void _onSessionChanged() {
     // 进房成功后把正在播的视频挂进引擎(创建/加入时通常已在视频页)
     if (inRoom && !_playerAttached) {
       final player = PlPlayerController.instance;
-      if (player != null && player.videoType == VideoType.ugc) {
+      if (player != null && _isSyncableVideo(player)) {
         _onDataSource(player);
       }
     }
@@ -142,13 +148,14 @@ class SyncPlayService extends ChangeNotifier {
     if (!inRoom) {
       return;
     }
-    // v1 边界:仅普通视频参与同步(直播/番剧/课堂不挂)
-    if (player.isLive || player.videoType != VideoType.ugc) {
+    if (!_isSyncableVideo(player)) {
       return;
     }
     final bvid = player.bvidOrNull;
     final cid = player.cid;
-    if (bvid == null || cid == null) {
+    final isPgc = player.videoType == VideoType.pgc;
+    final epid = player.epidOrNull;
+    if (isPgc ? epid == null : (bvid == null || cid == null)) {
       return;
     }
     // 播放器实例可能是新建的:重新挂实例级监听(Set 幂等)
@@ -157,8 +164,15 @@ class SyncPlayService extends ChangeNotifier {
       ..addStatusLister(_onStatus);
     _playerAttached = true;
 
-    engine.onVideoLoaded(bvid: bvid, cid: cid, title: _titleCache[bvid]);
-    if (_titleCache[bvid] == null) {
+    engine.onVideoLoaded(
+      bvid: bvid,
+      cid: cid,
+      epId: isPgc ? epid : null,
+      seasonId: isPgc ? player.seasonIdOrNull : null,
+      title: bvid == null ? null : _titleCache[bvid],
+    );
+    // 番剧集的 bvid 同样能换取集标题(x/web-interface/view 支持)
+    if (bvid != null && _titleCache[bvid] == null) {
       _fetchTitle(bvid);
     }
     // 拉一次权威房间状态:处理跟随切页后的进度/暂停施加
@@ -166,12 +180,14 @@ class SyncPlayService extends ChangeNotifier {
   }
 
   Future<void> _fetchTitle(String bvid) async {
+    final videoId = engine.currentVideo?.videoId;
     final res = await VideoHttp.videoIntro(bvid: bvid);
     if (res case Success(:final response)) {
       final title = response.title;
       if (title != null) {
         _titleCache[bvid] = title;
-        if (engine.currentVideo?.videoId.startsWith(bvid) ?? false) {
+        // 期间可能已切页:仅当仍是发起时的视频才回写标题
+        if (videoId != null && engine.currentVideo?.videoId == videoId) {
           engine.currentTitle = title;
         }
       }
@@ -275,7 +291,7 @@ class SyncPlayService extends ChangeNotifier {
   void shareCurrentVideo() {
     if (engine.currentVideo == null) {
       final player = PlPlayerController.instance;
-      if (player != null && player.videoType == VideoType.ugc) {
+      if (player != null && _isSyncableVideo(player)) {
         _onDataSource(player);
       }
     }

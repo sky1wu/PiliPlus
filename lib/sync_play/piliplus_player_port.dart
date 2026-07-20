@@ -6,7 +6,7 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:sync_play_core/sync_play_core.dart';
 
 /// [SyncPlayPlayerPort] 的 PiliPlus 实现:施加动作走 PlPlayerController
-/// 单例,切换视频走 PageUtils.toVideoPage。
+/// 单例,切换视频走 PageUtils.toVideoPage(普通视频)/ viewPgc(番剧)。
 ///
 /// 引擎在程序化施加窗口内调用这些方法,期间播放器回流的事件由引擎的
 /// 回声抑制丢弃,这里不需要额外防护。
@@ -42,8 +42,22 @@ class PiliPlusPlayerPort implements SyncPlayPlayerPort {
     // videoId 形态(protocol 约定):BVxxx / BVxxx:cid / BVxxx:pN / (ep|ss)N
     final parts = ref.videoId.split(':');
     final id = parts.first;
+    final pgcMatch = RegExp(r'^(ep|ss)(\d+)$').firstMatch(id);
+    if (pgcMatch != null) {
+      // 番剧:ep 直达该集;ss(浏览器在季页分享)由 viewPgc 解析到
+      // 默认集,加载后引擎按 seasonId 采纳房间身份
+      final isEp = pgcMatch.group(1) == 'ep';
+      final numId = pgcMatch.group(2)!;
+      await PageUtils.viewPgc(
+        epId: isEp ? numId : null,
+        seasonId: isEp ? null : numId,
+        progress: (initialSeconds * 1000).round(),
+        extraArguments: const {'autoPlay': true},
+      );
+      return;
+    }
     if (!id.startsWith('BV')) {
-      // v1 边界:仅支持普通视频(ugc)
+      // v1 边界:直播/课堂等其余形态不支持
       SmartDialog.showToast('Bili SyncPlay 暂不支持该视频类型($id)');
       return;
     }

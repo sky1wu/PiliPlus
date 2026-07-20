@@ -726,4 +726,83 @@ void main() {
       },
     );
   });
+
+  group('PlayerSyncEngine (bangumi)', () {
+    const epUrl = 'https://www.bilibili.com/bangumi/play/ep123456';
+    const ssUrl = 'https://www.bilibili.com/bangumi/play/ss26257';
+
+    RoomState pgcRoomState({String videoId = 'ep123456', String url = epUrl}) =>
+        RoomState(
+          roomCode: 'ABC123',
+          sharedVideo: SharedVideo(
+            videoId: videoId,
+            url: url,
+            title: 'Bangumi',
+            sharedByMemberId: 'member-2',
+          ),
+          playback: playback(url: url, currentTime: 30),
+          members: const [RoomMember(id: 'member-1', name: 'Alice')],
+        );
+
+    test('shares a loaded episode with ep identity', () {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(epId: 123456, seasonId: 26257, title: 'B');
+      expect(harness.engine.currentVideo!.videoId, 'ep123456');
+      expect(harness.engine.currentVideo!.normalizedUrl, epUrl);
+      harness.engine.shareCurrentVideo(snapshot: harness.snapshot());
+      expect(harness.session.sharedVideos.single.videoId, 'ep123456');
+    });
+
+    test('navigates to a shared episode and aligns on load', () async {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD');
+      final state = pgcRoomState();
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      expect(harness.port.calls.single, startsWith('openVideo:$epUrl'));
+      harness.port.calls.clear();
+
+      // 目标番剧页加载:ep 身份逐字对齐,不再导航,正常施加
+      harness.engine.onVideoLoaded(epId: 123456, seasonId: 26257);
+      harness.engine.lastKnownPositionSeconds = 0;
+      harness.engine.lastKnownRate = 1;
+      await harness.engine.applyRoomState(state);
+      expect(harness.port.calls, ['seekTo:30.0', 'play']);
+    });
+
+    test('adopts ss identity when the local season matches', () async {
+      // 浏览器扩展在番剧季页(ss URL)分享:身份不含集数,导航后
+      // App 打开具体某集(ep 形态),按 seasonId 采纳房间身份
+      final harness = EngineHarness();
+      final state = pgcRoomState(videoId: 'ss26257', url: ssUrl);
+      harness.session.roomState = state;
+      harness.engine.onVideoLoaded(epId: 123456, seasonId: 26257);
+      expect(harness.engine.currentVideo!.videoId, 'ss26257');
+      expect(harness.engine.currentVideo!.normalizedUrl, ssUrl);
+
+      harness.engine.lastKnownPositionSeconds = 0;
+      harness.engine.lastKnownRate = 1;
+      await harness.engine.applyRoomState(state);
+      expect(harness.port.calls, ['seekTo:30.0', 'play']);
+    });
+
+    test('does not adopt ss identity for a different season', () async {
+      final harness = EngineHarness();
+      final state = pgcRoomState(videoId: 'ss26257', url: ssUrl);
+      harness.session.roomState = state;
+      harness.engine.onVideoLoaded(epId: 999, seasonId: 11111);
+      expect(harness.engine.currentVideo!.videoId, 'ep999');
+
+      await harness.engine.applyRoomState(state);
+      expect(harness.port.calls.single, startsWith('openVideo:$ssUrl'));
+    });
+
+    test('clears season context when a normal video loads', () {
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(epId: 123456, seasonId: 26257);
+      expect(harness.engine.currentSeasonId, 26257);
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      expect(harness.engine.currentSeasonId, isNull);
+    });
+  });
 }

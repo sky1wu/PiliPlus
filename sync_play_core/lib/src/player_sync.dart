@@ -361,13 +361,16 @@ _VideoIdParts _parseVideoId(String videoId) {
   return (base: parts.first, cid: cid, page: page);
 }
 
-/// 两个协议 videoId(`BVxx[:cid|:pN]` 等)是否可能指向同一视频。
+/// 两个协议 videoId(`BVxx[:cid|:pN]`、`epN`、`ssN` 等)是否可能指向
+/// 同一视频。
 ///
 /// 浏览器扩展的"当前视频身份"取自地址栏,导航到共享 URL 后与房间身份
 /// 逐字相等;移动端身份由 bvid/cid 构造,与共享 URL 的形态(带不带
 /// cid/分P)可能不同。比对必须宽容:同 bvid 且无法确认 cid/分P 不同时
 /// 一律视为同一视频,否则会反复导航(video-identity.ts:
 /// isConfirmedDifferentSharedVideo 的"confirmed"语义)。
+/// `epN`/`ssN` 直接按 base 比较;`ssN` 与 `epX` 的归属关系无法从 id
+/// 判定,由引擎结合本地 seasonId 另行采纳(见 _mayAdoptSharedIdentity)。
 bool videoIdsMayReferToSameVideo(String a, String b) {
   final pa = _parseVideoId(a);
   final pb = _parseVideoId(b);
@@ -435,6 +438,9 @@ class PlayerSyncEngine {
   BilibiliVideoRef? currentVideo;
   String? currentTitle;
 
+  /// 当前视频为番剧集时的所属 seasonId(用于采纳 `ssN` 形态的共享身份)。
+  int? currentSeasonId;
+
   /// 进房/换视频后,首个权威 room:state 施加前为 true(hydration 窗口)。
   bool pendingRoomStateHydration = false;
 
@@ -466,20 +472,46 @@ class PlayerSyncEngine {
 
   void _log(String message) => log?.call(message);
 
+  static final RegExp _seasonVideoIdPattern = RegExp(r'^ss(\d+)$');
+
+  /// 共享身份能否被本地视频采纳。`ssN`(浏览器在番剧季页分享)不含集数,
+  /// 是不稳定身份(video-identity.ts: hasStableSharedVideoIdentity),
+  /// 不能据以确认不同;本地已知所属 [currentSeasonId] 相符即采纳。
+  bool _mayAdoptSharedIdentity(String localVideoId, String sharedVideoId) {
+    if (videoIdsMayReferToSameVideo(localVideoId, sharedVideoId)) {
+      return true;
+    }
+    final ssMatch = _seasonVideoIdPattern.firstMatch(sharedVideoId);
+    if (ssMatch == null) {
+      return false;
+    }
+    return currentSeasonId != null &&
+        int.parse(ssMatch.group(1)!) == currentSeasonId;
+  }
+
   // ------------------------------------------------------------ 本地事件
 
   /// 播放器加载了新视频(App 层在 setDataSource 完成时调用)。
+  /// 番剧集传 [epId](可带 [seasonId]),身份用 `epN` 形态;
+  /// 普通视频传 [bvid](可带 cid/page)。
   void onVideoLoaded({
-    required String bvid,
+    String? bvid,
     int? cid,
     int? page,
+    int? epId,
+    int? seasonId,
     String? title,
   }) {
-    final ref = buildBilibiliVideoRef(bvid: bvid, cid: cid, page: page);
+    final ref = epId != null
+        ? buildBilibiliEpisodeRef(epId: epId)
+        : bvid != null
+        ? buildBilibiliVideoRef(bvid: bvid, cid: cid, page: page)
+        : null;
     if (ref == null) {
-      _log('onVideoLoaded: unsupported video id $bvid');
+      _log('onVideoLoaded: unsupported video id ${bvid ?? 'ep$epId'}');
       return;
     }
+    currentSeasonId = epId != null ? seasonId : null;
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -488,7 +520,7 @@ class PlayerSyncEngine {
         : normalizeBilibiliUrl(shared.url);
     if (shared != null &&
         normalizedShared != null &&
-        videoIdsMayReferToSameVideo(ref.videoId, shared.videoId)) {
+        _mayAdoptSharedIdentity(ref.videoId, shared.videoId)) {
       currentVideo = BilibiliVideoRef(
         videoId: shared.videoId,
         normalizedUrl: normalizedShared,
@@ -688,7 +720,7 @@ class PlayerSyncEngine {
       // 加载早于进房时错过了 onVideoLoaded 的身份采纳:补一次
       if (current != null &&
           current.videoId != sharedVideo.videoId &&
-          videoIdsMayReferToSameVideo(current.videoId, sharedVideo.videoId)) {
+          _mayAdoptSharedIdentity(current.videoId, sharedVideo.videoId)) {
         currentVideo = BilibiliVideoRef(
           videoId: sharedVideo.videoId,
           normalizedUrl: normalizedSharedUrl,

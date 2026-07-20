@@ -174,4 +174,21 @@ void main() {
       expect(buildBilibiliVideoRef(bvid: 'BV1xx411c7mD', page: 0), isNull);
     });
   });
+
+  group('buildBilibiliEpisodeRef (mobile-side construction)', () {
+    test('round-trips and matches normalizeBilibiliUrl byte-for-byte', () {
+      final built = buildBilibiliEpisodeRef(epId: 123456)!;
+      expect(built.videoId, 'ep123456');
+      expect(parseBilibiliVideoRef(built.normalizedUrl), built);
+      expect(
+        built.normalizedUrl,
+        normalizeBilibiliUrl('https://www.bilibili.com/bangumi/play/ep123456'),
+      );
+    });
+
+    test('rejects invalid epId', () {
+      expect(buildBilibiliEpisodeRef(epId: 0), isNull);
+      expect(buildBilibiliEpisodeRef(epId: -1), isNull);
+    });
+  });
 }

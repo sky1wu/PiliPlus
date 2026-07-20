@@ -163,3 +163,15 @@ BilibiliVideoRef? buildBilibiliVideoRef({
     normalizedUrl: 'https://www.bilibili.com/video/$bvid',
   );
 }
+
+/// 移动端专用:从番剧 epId 构造视频引用,输出与 [normalizeBilibiliUrl]
+/// 对 `/bangumi/play/epN` 的规范化结果逐字节一致(有对照测试保证)。
+BilibiliVideoRef? buildBilibiliEpisodeRef({required int epId}) {
+  if (epId < 1) {
+    return null;
+  }
+  return BilibiliVideoRef(
+    videoId: 'ep$epId',
+    normalizedUrl: 'https://www.bilibili.com/bangumi/play/ep$epId',
+  );
+}
