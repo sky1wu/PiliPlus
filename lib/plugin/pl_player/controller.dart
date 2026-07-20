@@ -1296,9 +1296,7 @@ class PlPlayerController with BlockConfigMixin {
   // 双击播放、暂停
   Future<void> onDoubleTapCenter() async {
     // 播放/暂停按钮与双击手势的统一入口:先通知同步钩子这是用户手势
-    for (final listener in Set.of(syncPlayUserToggleListeners)) {
-      listener(this);
-    }
+    notifySyncPlayUserToggle();
     if (!isLive && isCompleted) {
       await videoPlayerController!.seek(Duration.zero);
       videoPlayerController!.play();
@@ -1461,6 +1459,15 @@ class PlPlayerController with BlockConfigMixin {
   static final Set<VoidCallback> syncPlayPlayerDisposeListeners = {};
   static final Set<void Function(PlPlayerController player, bool buffering)>
   syncPlayBufferingListeners = {};
+
+  /// 通知同步钩子"这是一次用户主动的播放/暂停手势"。
+  /// 播放器控件内的入口是 [onDoubleTapCenter];封面上的播放按钮走的是
+  /// 视频页的 handlePlay,不经过这里,需要它自己调一次。
+  void notifySyncPlayUserToggle() {
+    for (final listener in Set.of(syncPlayUserToggleListeners)) {
+      listener(this);
+    }
+  }
 
   void _notifySyncPlayBuffering(bool buffering) {
     for (final listener in Set.of(syncPlayBufferingListeners)) {
