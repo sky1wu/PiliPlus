@@ -13,6 +13,7 @@ import 'package:PiliPlus/pages/home/view.dart';
 import 'package:PiliPlus/pages/main/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
+import 'package:PiliPlus/sync_play/ui/sync_play_entry.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/app_scheme.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
@@ -523,6 +524,7 @@ class _MainAppState extends PopScopeState<MainApp>
         userAvatar(theme: theme, mainController: _mainController),
         const SizedBox(height: 8),
         msgBadge(_mainController),
+        const SyncPlayEntryButton(),
         IconButton(
           tooltip: '搜索',
           icon: const Icon(

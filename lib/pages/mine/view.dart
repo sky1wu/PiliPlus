@@ -14,8 +14,6 @@ import 'package:PiliPlus/pages/login/controller.dart';
 import 'package:PiliPlus/pages/main/controller.dart';
 import 'package:PiliPlus/pages/mine/controller.dart';
 import 'package:PiliPlus/pages/mine/widgets/item.dart';
-import 'package:PiliPlus/sync_play/sync_play_messages.dart';
-import 'package:PiliPlus/sync_play/ui/room_panel.dart';
 import 'package:PiliPlus/utils/bili_utils.dart';
 import 'package:PiliPlus/utils/extension/get_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -209,14 +207,6 @@ class _MediaPageState extends CommonPageState<MinePage>
               icon: controller.themeType.value.icon,
             );
           },
-        ),
-        IconButton(
-          iconSize: iconSize,
-          padding: padding,
-          style: style,
-          tooltip: SyncPlayMessages.title,
-          onPressed: () => SyncPlayRoomPanel.show(context),
-          icon: const Icon(Icons.groups_outlined),
         ),
         IconButton(
           iconSize: iconSize,

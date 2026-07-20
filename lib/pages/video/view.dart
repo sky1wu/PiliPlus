@@ -50,6 +50,7 @@ import 'package:PiliPlus/plugin/pl_player/view/view.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService;
+import 'package:PiliPlus/sync_play/ui/sync_play_entry.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/extension/scroll_controller_ext.dart';
@@ -1136,6 +1137,18 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                 ],
               ),
               actions: [
+                // 未开播时播放控件不可见,这里补一个一起看入口,
+                // 否则要先点播放才能进房间
+                const SyncPlayEntryButton(
+                  iconSize: 22,
+                  color: Colors.white,
+                  shadows: [
+                    Shadow(
+                      blurRadius: 1.5,
+                      color: Colors.black,
+                    ),
+                  ],
+                ),
                 _moreBtn(
                   Colors.white,
                   shadows: const [
