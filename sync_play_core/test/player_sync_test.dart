@@ -520,10 +520,8 @@ void main() {
       );
     });
 
-    test('auto-shares next video when local user is the sharer', () async {
-      final harness = EngineHarness();
-      await harness.loadSharedVideoAndHydrate();
-      // 本人是共享者
+    /// 本人是共享者的房间状态(自动分享的前置条件之一)。
+    void makeLocalUserTheSharer(EngineHarness harness) {
       harness.session.roomState = roomState(
         sharedVideo: const SharedVideo(
           videoId: 'BV1xx411c7mD:42',
@@ -533,24 +531,110 @@ void main() {
         ),
         playback: playback(),
       );
+    }
 
+    test('auto-shares the next video after the shared one plays out', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      // 共享视频自然播完 → 连播加载下一个
+      harness.engine.onLocalEnded(
+        harness.snapshot(playState: PlaybackPlayState.paused),
+      );
       harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', title: 'Next');
       expect(harness.session.sharedVideos, hasLength(1));
       expect(harness.session.sharedVideos.single.url, otherUrl);
       expect(harness.session.sharedVideos.single.title, 'Next');
     });
 
+    test('does not auto-share a manually opened video', () async {
+      // 回归:用户手动切视频被当成连播自动共享给房间
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', title: 'Next');
+      expect(harness.session.sharedVideos, isEmpty);
+    });
+
+    test('does not auto-share after leaving the video page', () async {
+      // 回归(用户报告):退出当前视频再打开新视频被自动共享。
+      // 连播是同播放器实例内换源,播放器销毁即证明是手动选片。
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      harness.engine.onLocalEnded(
+        harness.snapshot(playState: PlaybackPlayState.paused),
+      );
+      harness.engine.onPlayerDetached();
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', title: 'Next');
+      expect(harness.session.sharedVideos, isEmpty);
+    });
+
+    test('does not auto-share beyond the continuation window', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      harness.engine.onLocalEnded(
+        harness.snapshot(playState: PlaybackPlayState.paused),
+      );
+      harness.now += autoplayContinuationWindowMs + 1;
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', title: 'Next');
+      expect(harness.session.sharedVideos, isEmpty);
+    });
+
+    test('does not auto-share when the user acts after the end', () async {
+      // 播完后又操作播放器 = 手动选片
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      harness.engine.onLocalEnded(
+        harness.snapshot(playState: PlaybackPlayState.paused),
+      );
+      harness.now += 100;
+      harness.engine.onUserGesture(ExplicitUserActionKind.play);
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', title: 'Next');
+      expect(harness.session.sharedVideos, isEmpty);
+    });
+
+    test('defers auto-share until the title resolves', () async {
+      // 标题随详情接口异步到达,早于它分享会把 videoId 当标题发出去
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      harness.engine.onLocalEnded(
+        harness.snapshot(playState: PlaybackPlayState.paused),
+      );
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD');
+      expect(harness.session.sharedVideos, isEmpty);
+
+      harness.engine.onTitleResolved('Next');
+      expect(harness.session.sharedVideos, hasLength(1));
+      expect(harness.session.sharedVideos.single.title, 'Next');
+    });
+
+    test('a resolved title alone never triggers a share', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      makeLocalUserTheSharer(harness);
+
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD');
+      harness.engine.onTitleResolved('Next');
+      expect(harness.session.sharedVideos, isEmpty);
+      expect(harness.engine.currentTitle, 'Next');
+    });
+
     test('defers auto-share while awaiting fresh room state', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
-      harness.session.roomState = roomState(
-        sharedVideo: const SharedVideo(
-          videoId: 'BV1xx411c7mD:42',
-          url: sharedUrl,
-          title: 'Video',
-          sharedByMemberId: 'member-1',
-        ),
-        playback: playback(),
+      makeLocalUserTheSharer(harness);
+      harness.engine.onLocalEnded(
+        harness.snapshot(playState: PlaybackPlayState.paused),
       );
       harness.session.awaitingFreshRoomState = true;
       harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', title: 'Next');

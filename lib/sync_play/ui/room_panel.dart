@@ -263,9 +263,10 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
       ),
       const SizedBox(height: 16),
       FilledButton.icon(
+        // 分享可能要先等标题就绪,不阻塞面板收起
         onPressed: () {
-          service.shareCurrentVideo();
           Navigator.of(context).pop();
+          service.shareCurrentVideo();
         },
         icon: const Icon(Icons.screen_share_outlined),
         label: const Text(SyncPlayMessages.actionShareCurrentVideo),

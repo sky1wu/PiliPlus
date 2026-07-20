@@ -28,6 +28,10 @@ const int explicitSeekBroadcastGraceMs = 2500;
 /// 超过该值才随 timeupdate 补发周期心跳。
 const int timeupdateBroadcastMinIntervalMs = 2000;
 
+/// 共享视频自然播完后,多久之内加载的新视频才算"连播"
+/// (extension/src/content/index.ts: INITIAL_ROOM_STATE_PAUSE_HOLD_MS)。
+const int autoplayContinuationWindowMs = 3000;
+
 /// 本地播放事件来源(runtime-state.ts: LocalPlaybackEventSource 的移动端子集)。
 enum LocalPlaybackEventSource {
   play,
@@ -461,6 +465,14 @@ class PlayerSyncEngine {
   /// 已为该共享 URL 发起过导航就不再重复,等目标页 onVideoLoaded。
   String? _lastOpenedSharedUrl;
 
+  // ---- 连播判定标记(playback-binding-controller.ts:
+  // markSharedVideoNaturalEnd;共享 URL 变化/离房/播放器销毁时清除) ----
+  String? _sharedVideoNaturalEndUrl;
+  num _sharedVideoNaturalEndAt = 0;
+
+  /// 连播条件已满足但标题尚未就绪,等 [onTitleResolved] 补发分享。
+  bool _pendingAutoShareOnTitle = false;
+
   /// 桥接层随位置回调持续写入的本地播放快照(施加时的对齐基准)。
   double? lastKnownPositionSeconds;
   double? lastKnownRate;
@@ -546,6 +558,9 @@ class PlayerSyncEngine {
     currentTitle = null;
     currentSeasonId = null;
     pendingRoomStateHydration = false;
+    // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
+    // 之后打开的任何视频都是手动选片,不得自动分享
+    _clearSharedVideoNaturalEnd();
   }
 
   /// 手动打开当前共享视频(房间面板入口,对应扩展端 popup 的
@@ -640,13 +655,49 @@ class PlayerSyncEngine {
     _broadcastPlayback(LocalPlaybackEventSource.ratechange, snapshot);
   }
 
-  /// 共享视频自然播完(简化:不做扩展端的 autoplay-next 抑制窗口)。
+  /// 共享视频自然播完。记录自然结束标记:紧随其后加载的视频才算连播,
+  /// 是自动分享的唯一入口(playback-binding-controller.ts:
+  /// markSharedVideoNaturalEnd)。
   void onLocalEnded(LocalPlaybackSnapshot snapshot) {
+    _markSharedVideoNaturalEnd();
     _broadcastPlayback(LocalPlaybackEventSource.ended, (
       positionSeconds: snapshot.positionSeconds,
       playState: PlaybackPlayState.paused,
       playbackRate: snapshot.playbackRate,
     ), naturalEnd: true);
+  }
+
+  void _markSharedVideoNaturalEnd() {
+    final sharedUrl = _normalizedSharedUrl();
+    // 播完的必须就是房间共享的那个视频
+    if (session.roomCode == null ||
+        sharedUrl == null ||
+        currentVideo?.normalizedUrl != sharedUrl) {
+      return;
+    }
+    _sharedVideoNaturalEndUrl = sharedUrl;
+    _sharedVideoNaturalEndAt = _nowMs();
+  }
+
+  void _clearSharedVideoNaturalEnd() {
+    _sharedVideoNaturalEndUrl = null;
+    _sharedVideoNaturalEndAt = 0;
+    _pendingAutoShareOnTitle = false;
+  }
+
+  /// 标题异步就绪(App 层取回视频标题后回调)。若连播自动分享因标题
+  /// 未就绪而推迟,这里补发——否则房间里会显示成 videoId。
+  void onTitleResolved(String title) {
+    currentTitle = title;
+    if (!_pendingAutoShareOnTitle) {
+      return;
+    }
+    _pendingAutoShareOnTitle = false;
+    // 连播条件在推迟时已判定通过,此处只补标题就绪后的分享
+    if (session.awaitingFreshRoomState) {
+      return;
+    }
+    shareCurrentVideo();
   }
 
   bool _shouldSuppressAsEcho(
@@ -754,6 +805,13 @@ class PlayerSyncEngine {
     final normalizedSharedUrl = sharedVideo == null
         ? null
         : normalizeBilibiliUrl(sharedVideo.url);
+
+    // 共享视频换了:上一个视频的自然结束标记作废,不能用来把之后的
+    // 手动切页认成连播(room-state-controller.ts 的同名清理)
+    if (_sharedVideoNaturalEndUrl != null &&
+        _sharedVideoNaturalEndUrl != normalizedSharedUrl) {
+      _clearSharedVideoNaturalEnd();
+    }
 
     if (sharedVideo != null && normalizedSharedUrl != null) {
       final current = currentVideo;
@@ -951,11 +1009,16 @@ class PlayerSyncEngine {
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;
+    _clearSharedVideoNaturalEnd();
   }
 
-  /// 当前用户是共享者且切到了新视频:自动跟进分享
-  /// (对应扩展端 auto-share 的最小语义;awaitingFreshRoomState 窗口内推迟,
-  /// 避免用过期快照断言共享者身份——见 runtime-state.ts 注释)。
+  /// 共享者的**连播**自动跟进分享(navigation-controller.ts:
+  /// shouldTreatAsAutoplay && isLocalSharedSource)。
+  ///
+  /// 手动切视频一律不自动分享——扩展端任何 genuine navigation 都会
+  /// cancelAutoShareNextVideo,只有从共享视频自然播完接上的下一个视频
+  /// 才调度。awaitingFreshRoomState 窗口内推迟,避免用过期快照断言
+  /// 共享者身份(见 runtime-state.ts 注释)。
   void _maybeAutoShareAsSharer() {
     if (session.awaitingFreshRoomState) {
       return;
@@ -969,6 +1032,29 @@ class PlayerSyncEngine {
     if (sharedUrl == null || currentVideo?.normalizedUrl == sharedUrl) {
       return;
     }
+    if (!_isAutoplayContinuationFrom(sharedUrl)) {
+      _log('Skip auto-share: not an autoplay continuation of $sharedUrl');
+      return;
+    }
+    // 标题随视频详情异步到达,早于它分享会把 videoId 当标题发给房间
+    if (currentTitle == null) {
+      _log('Deferring auto-share until the title resolves');
+      _pendingAutoShareOnTitle = true;
+      return;
+    }
     shareCurrentVideo();
+  }
+
+  /// 本次视频加载是否接在共享视频的自然播完之后(即连播)。
+  bool _isAutoplayContinuationFrom(String previousSharedUrl) {
+    if (_sharedVideoNaturalEndUrl != previousSharedUrl) {
+      return false;
+    }
+    if (_nowMs() - _sharedVideoNaturalEndAt >= autoplayContinuationWindowMs) {
+      return false;
+    }
+    // 播完后用户又操作了播放器 = 手动选片,不是连播
+    // (拖到末尾触发的结束,其 seek 手势早于结束时刻,不受此门阻断)
+    return lastUserGestureAt <= _sharedVideoNaturalEndAt;
   }
 }

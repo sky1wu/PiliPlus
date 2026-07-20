@@ -126,8 +126,7 @@ class SyncPlayService extends ChangeNotifier {
   /// v1 边界:普通视频与番剧参与同步(直播/课堂不挂)。
   static bool _isSyncableVideo(PlPlayerController player) =>
       !player.isLive &&
-      (player.videoType == VideoType.ugc ||
-          player.videoType == VideoType.pgc);
+      (player.videoType == VideoType.ugc || player.videoType == VideoType.pgc);
 
   void _onSessionChanged() {
     // 进房成功后把正在播的视频挂进引擎(创建/加入时通常已在视频页)
@@ -189,10 +188,29 @@ class SyncPlayService extends ChangeNotifier {
         _titleCache[bvid] = title;
         // 期间可能已切页:仅当仍是发起时的视频才回写标题
         if (videoId != null && engine.currentVideo?.videoId == videoId) {
-          engine.currentTitle = title;
+          // 引擎可能在等标题补发连播分享,走 onTitleResolved
+          engine.onTitleResolved(title);
         }
       }
     }
+  }
+
+  /// 分享前确保标题就绪:标题随视频详情异步到达,刚进页面就点分享时
+  /// 可能还没到,直接分享会把 videoId 当标题发给房间。
+  Future<void> _ensureTitle() async {
+    if (engine.currentTitle != null) {
+      return;
+    }
+    final bvid = PlPlayerController.instance?.bvidOrNull;
+    if (bvid == null) {
+      return;
+    }
+    final cached = _titleCache[bvid];
+    if (cached != null) {
+      engine.currentTitle = cached;
+      return;
+    }
+    await _fetchTitle(bvid);
   }
 
   LocalPlaybackSnapshot _snapshot({double? positionSeconds}) {
@@ -301,7 +319,7 @@ class SyncPlayService extends ChangeNotifier {
     engine.openSharedVideoManually();
   }
 
-  void shareCurrentVideo() {
+  Future<void> shareCurrentVideo() async {
     if (engine.currentVideo == null) {
       final player = PlPlayerController.instance;
       if (player != null && _isSyncableVideo(player)) {
@@ -310,6 +328,11 @@ class SyncPlayService extends ChangeNotifier {
     }
     if (engine.currentVideo == null) {
       SmartDialog.showToast('当前页面没有可播放的视频。');
+      return;
+    }
+    await _ensureTitle();
+    if (engine.currentVideo == null) {
+      // 等标题期间用户已离开视频页
       return;
     }
     engine.shareCurrentVideo(snapshot: _snapshot());
