@@ -6,7 +6,8 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:sync_play_core/sync_play_core.dart';
 
 /// Bili SyncPlay 房间面板:建房/加入/成员列表/分享/离开。
-/// 从播放器底部控制栏的按钮弹出(BottomSheet)。
+/// 从播放器底部控制栏按钮或"我的"页入口弹出(BottomSheet),
+/// 不依赖播放器,任意页面可用。
 /// 邀请码沿用浏览器扩展的 `roomCode:joinToken` 格式,输入与复制均不拆分;
 /// 昵称不做输入:登录取 B 站昵称,未登录由服务端分配 Guest-xxx。
 class SyncPlayRoomPanel extends StatefulWidget {
@@ -195,21 +196,30 @@ class _SyncPlayRoomPanelState extends State<SyncPlayRoomPanel> {
         ),
       ),
       if (sharedVideo != null)
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          leading: const Icon(Icons.play_circle_outline),
-          title: Text(
-            sharedVideo.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          subtitle: Text(
-            SyncPlayMessages.ownerSharedBy(
-              sharedVideo.sharedByDisplayName ??
-                  sharedVideo.sharedByMemberId ??
-                  '?',
+        Tooltip(
+          message: SyncPlayMessages.actionOpenSharedVideoHint,
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            leading: const Icon(Icons.play_circle_outline),
+            title: Text(
+              sharedVideo.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
+            subtitle: Text(
+              SyncPlayMessages.ownerSharedBy(
+                sharedVideo.sharedByDisplayName ??
+                    sharedVideo.sharedByMemberId ??
+                    '?',
+              ),
+            ),
+            trailing: const Icon(Icons.open_in_new, size: 18),
+            // 先收起面板再发起导航,避免 pop 弹掉刚 push 的视频页
+            onTap: () {
+              Navigator.of(context).pop();
+              service.openSharedVideo();
+            },
           ),
         )
       else

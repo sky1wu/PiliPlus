@@ -18,6 +18,7 @@ abstract final class SyncPlayMessages {
   static const String sectionRoomMembers = '成员';
   static const String stateNoMembers = '暂无成员';
   static const String actionShareCurrentVideo = '同步当前页视频';
+  static const String actionOpenSharedVideoHint = '点击可打开共享视频';
   static const String pageShareSuccess = '已同步当前页视频';
   static const String errorInvalidInviteFormat = '邀请格式无效，请输入“房间码:加入码”。';
   static const String invalidServerUrl = '服务端地址必须以 ws:// 或 wss:// 开头。';

@@ -536,6 +536,46 @@ class PlayerSyncEngine {
     }
   }
 
+  /// 播放器随视频页销毁(用户离开视频页回到非视频页面):清除本地
+  /// 视频上下文,后续 room:state 的导航/施加判定不再被过期身份误导
+  /// (过期身份会错误吸收采纳与"同一视频"判定,把新共享当成正在看)。
+  /// 有意不清 [_lastOpenedSharedUrl]:与扩展端 tab-controller 一致,
+  /// 用户主动离开共享视频后同一 URL 不再拉回,共享 URL 变化才重新导航。
+  void onPlayerDetached() {
+    currentVideo = null;
+    currentTitle = null;
+    currentSeasonId = null;
+    pendingRoomStateHydration = false;
+  }
+
+  /// 手动打开当前共享视频(房间面板入口,对应扩展端 popup 的
+  /// openSharedVideoFromPopup):不受防重导航记录限制,无条件导航。
+  Future<void> openSharedVideoManually() async {
+    final state = session.roomState;
+    final shared = state?.sharedVideo;
+    if (shared == null) {
+      return;
+    }
+    if (currentVideo != null && currentVideo!.videoId == shared.videoId) {
+      // 已在共享视频页:拉一次权威状态对齐即可
+      return;
+    }
+    final targetRef = parseBilibiliVideoRef(shared.url);
+    if (targetRef == null) {
+      return;
+    }
+    _lastOpenedSharedUrl = normalizeBilibiliUrl(shared.url);
+    final playback = state?.playback;
+    _log('Manually opening shared video ${targetRef.normalizedUrl}');
+    pendingRoomStateHydration = true;
+    await port.openVideo(
+      targetRef,
+      initialSeconds: playback?.currentTime ?? 0,
+      startPaused:
+          playback == null || playback.playState != PlaybackPlayState.playing,
+    );
+  }
+
   /// 用户手势(UI 层能确定是用户操作时调用,如控制条按钮)。
   void onUserGesture(ExplicitUserActionKind kind) {
     final now = _nowMs();

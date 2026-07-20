@@ -805,4 +805,78 @@ void main() {
       expect(harness.engine.currentSeasonId, isNull);
     });
   });
+
+  group('PlayerSyncEngine (player detach)', () {
+    test(
+      'stale identity no longer swallows a re-shared video after detach',
+      () async {
+        // 回归:离开视频页后 currentVideo 过期,共享同 bvid 视频时被采纳
+        // 判定吸收,既不导航也无播放器可施加
+        final harness = EngineHarness();
+        harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+        harness.engine.onPlayerDetached();
+        expect(harness.engine.currentVideo, isNull);
+
+        final state = roomState(playback: playback());
+        harness.session.roomState = state;
+        await harness.engine.applyRoomState(state);
+        expect(harness.port.calls.single, startsWith('openVideo:$sharedUrl'));
+      },
+    );
+
+    test('same shared URL does not re-open after leaving its page', () async {
+      // 对齐扩展端 tab-controller:用户主动离开共享视频不被拉回,
+      // 共享 URL 变化才重新导航
+      final harness = EngineHarness();
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD');
+      final state = roomState(playback: playback());
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      expect(harness.port.calls.single, startsWith('openVideo:$sharedUrl'));
+      harness.port.calls.clear();
+
+      // 跟随到达共享视频页,随后离开
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.onPlayerDetached();
+
+      await harness.engine.applyRoomState(state);
+      expect(harness.port.calls, isEmpty);
+
+      // 共享切到新视频:重新导航
+      const nextUrl = 'https://www.bilibili.com/video/BV1cd411c7mD';
+      final next = RoomState(
+        roomCode: 'ABC123',
+        sharedVideo: const SharedVideo(
+          videoId: 'BV1cd411c7mD',
+          url: nextUrl,
+          title: 'Next',
+          sharedByMemberId: 'member-2',
+        ),
+        playback: playback(url: nextUrl, serverTime: 2000, seq: 2),
+        members: const [RoomMember(id: 'member-1', name: 'Alice')],
+      );
+      harness.session.roomState = next;
+      await harness.engine.applyRoomState(next);
+      expect(harness.port.calls.single, startsWith('openVideo:$nextUrl'));
+    });
+
+    test('openSharedVideoManually bypasses the navigation guard', () async {
+      final harness = EngineHarness();
+      final state = roomState(playback: playback());
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.engine.onPlayerDetached();
+      harness.port.calls.clear();
+
+      await harness.engine.openSharedVideoManually();
+      expect(harness.port.calls.single, startsWith('openVideo:$sharedUrl'));
+
+      // 已在共享视频页时不重复导航
+      harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);
+      harness.port.calls.clear();
+      await harness.engine.openSharedVideoManually();
+      expect(harness.port.calls, isEmpty);
+    });
+  });
 }

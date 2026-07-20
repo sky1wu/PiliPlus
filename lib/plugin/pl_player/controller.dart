@@ -1457,10 +1457,17 @@ class PlPlayerController with BlockConfigMixin {
   syncPlaySeekListeners = {};
   static final Set<void Function(PlPlayerController player)>
   syncPlayUserToggleListeners = {};
+  static final Set<VoidCallback> syncPlayPlayerDisposeListeners = {};
 
   void _notifySyncPlayDataSource() {
     for (final listener in Set.of(syncPlayDataSourceListeners)) {
       listener(this);
+    }
+  }
+
+  static void _notifySyncPlayPlayerDispose() {
+    for (final listener in Set.of(syncPlayPlayerDisposeListeners)) {
+      listener();
     }
   }
 
@@ -1627,6 +1634,7 @@ class PlPlayerController with BlockConfigMixin {
     _videoController = null;
     _instance = null;
     videoPlayerServiceHandler?.clear();
+    _notifySyncPlayPlayerDispose();
   }
 
   static void updatePlayCount() {

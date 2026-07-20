@@ -40,6 +40,7 @@ class SyncPlayService extends ChangeNotifier {
     PlPlayerController.syncPlayDataSourceListeners.add(_onDataSource);
     PlPlayerController.syncPlaySeekListeners.add(_onSeek);
     PlPlayerController.syncPlayUserToggleListeners.add(_onUserToggle);
+    PlPlayerController.syncPlayPlayerDisposeListeners.add(_onPlayerDisposed);
   }
 
   static SyncPlayService? _instance;
@@ -248,6 +249,13 @@ class SyncPlayService extends ChangeNotifier {
     );
   }
 
+  /// 播放器随视频页销毁(回到首页等非视频页面):清引擎的视频上下文,
+  /// 后续收到新共享 URL 时才能正确触发跟随导航。
+  void _onPlayerDisposed() {
+    _playerAttached = false;
+    engine.onPlayerDetached();
+  }
+
   void _onUserToggle(PlPlayerController player) {
     if (!inRoom) {
       return;
@@ -286,6 +294,11 @@ class SyncPlayService extends ChangeNotifier {
     engine.resetRoomLocalState();
     _resetToastState();
     session.requestLeaveRoom();
+  }
+
+  /// 手动打开当前共享视频(房间面板点击共享视频条目)。
+  void openSharedVideo() {
+    engine.openSharedVideoManually();
   }
 
   void shareCurrentVideo() {
