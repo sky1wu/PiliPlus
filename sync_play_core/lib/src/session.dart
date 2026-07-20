@@ -131,6 +131,7 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
 
   // ---- 时钟(runtime-state.ts: ClockState) ----
   double? clockOffsetMs;
+  @override
   double? rttMs;
   Timer? _clockTimer;
 

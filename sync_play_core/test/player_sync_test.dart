@@ -55,6 +55,8 @@ class FakeSession implements PlayerSyncSessionApi {
   bool awaitingFreshRoomState = false;
   @override
   RoomState? roomState;
+  @override
+  double? rttMs;
 
   final playbackUpdates = <PlaybackState>[];
   final sharedVideos = <SharedVideo>[];
@@ -438,6 +440,128 @@ void main() {
         expect(harness.session.playbackUpdates, hasLength(1));
       },
     );
+
+    test('rate-only drift nudges the rate instead of seeking', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 0.7s 漂移落在 rateOnly 档:只调速率,绝不能 seek
+      final state = roomState(
+        playback: playback(currentTime: 30.7, seq: 5),
+      );
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      expect(harness.port.calls, ['setRate:1.12', 'play']);
+      expect(harness.port.calls.join(), isNot(contains('seekTo')));
+    });
+
+    test('soft-apply drift steps the position, not a full jump', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 1.1s 漂移落在 softApply 档:进度只走一小步(≤0.4s),不是跳到 31.1
+      final state = roomState(
+        playback: playback(currentTime: 31.1, seq: 5),
+      );
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      expect(harness.port.calls, contains('seekTo:30.4'));
+      expect(harness.port.calls.join(), isNot(contains('seekTo:31.1')));
+    });
+
+    test('restores the base rate when the catch-up converges', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      final state = roomState(playback: playback(currentTime: 31.1, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.engine.lastKnownRate = 1.12;
+      harness.port.calls.clear();
+
+      // 本地追到目标 ±0.2s 内:恢复基准倍速
+      harness.engine.onLocalPosition(harness.snapshot(position: 31.0));
+      await Future<void>.delayed(Duration.zero);
+      expect(harness.port.calls, contains('setRate:1.0'));
+    });
+
+    test('local buffering abandons an active catch-up', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      final state = roomState(playback: playback(currentTime: 30.7, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.engine.lastKnownRate = 1.12;
+      harness.port.calls.clear();
+
+      // 追平期间开始缓冲:放弃追平并把倍速调回去
+      harness.engine.onLocalPlayStateChanged(
+        LocalPlaybackEventSource.waiting,
+        harness.snapshot(playState: PlaybackPlayState.buffering),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(harness.port.calls, contains('setRate:1.0'));
+    });
+
+    test('a user rate change ends the catch-up without restoring', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      final state = roomState(playback: playback(currentTime: 30.7, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.engine.lastKnownRate = 2;
+      harness.now += programmaticApplyWindowMs + 100;
+      harness.port.calls.clear();
+
+      // 用户接管倍速:不得把我们的基准倍速覆盖回去
+      harness.engine.onLocalRateChanged(harness.snapshot(rate: 2));
+      await Future<void>.delayed(Duration.zero);
+      expect(harness.port.calls.join(), isNot(contains('setRate')));
+    });
+
+    test('never overwrites a rate that is no longer ours', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      final state = roomState(playback: playback(currentTime: 31.1, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      // 播放器上的倍速已不是我们写的 1.12(用户在移动端改了速度,
+      // 而该路径目前不经过引擎):恢复会吞掉用户的操作
+      harness.engine.lastKnownRate = 2;
+      harness.port.calls.clear();
+
+      harness.engine.onLocalPosition(harness.snapshot(position: 31.0));
+      await Future<void>.delayed(Duration.zero);
+      expect(harness.port.calls.join(), isNot(contains('setRate')));
+    });
+
+    test('suppresses local broadcasts while catching up', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      final state = roomState(playback: playback(currentTime: 30.7, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      harness.now += programmaticApplyWindowMs + 100;
+      harness.session.playbackUpdates.clear();
+
+      // 追平期间进度/倍速是故意调偏的,不得播出去污染房间
+      harness.now += timeupdateBroadcastMinIntervalMs + 100;
+      harness.engine.onLocalPosition(harness.snapshot(position: 30.4));
+      expect(harness.session.playbackUpdates, isEmpty);
+    });
 
     test('remote buffering aligns position without pausing locally', () async {
       final harness = EngineHarness();

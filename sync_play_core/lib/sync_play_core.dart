@@ -15,6 +15,7 @@ export 'src/models.dart';
 export 'src/player_sync.dart';
 export 'src/server_messages.dart';
 export 'src/session.dart';
+export 'src/soft_apply.dart';
 export 'src/toast_plan.dart';
 export 'src/transport.dart';
 export 'src/video_ref.dart';

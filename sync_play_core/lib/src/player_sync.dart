@@ -4,22 +4,22 @@
 /// 与 sync-controller.ts 的关键守卫窗口。
 ///
 /// v1 相对浏览器端的显式简化(涉及行为差异的都在此声明):
-/// - 无 soft-apply 速率追赶(soft-apply-controller.ts 430 行):reconcile 的
-///   `rateOnly` 档按 ignore 处理(0.45–0.9s 漂移容忍,等下一拍),
-///   `softApply` 档按 hardSeek 处理;
 /// - 无 buffer-pause 升级分类:宿主播放器(PlPlayer)有独立 buffering 信号,
 ///   由桥接层映射成 `buffering` 播放态与 `waiting` 事件源传入;
 /// - 无 festival/watchlater 特例:App 内路由不存在该形态。
 ///
 /// 相对浏览器端的移动端专属处理:
 /// - 程序化 seek 的回声窗口按"位置真正到位"关闭(见
-///   [programmaticSeekSettleTimeoutMs]),不是浏览器端够用的固定 700ms。
+///   [programmaticSeekSettleTimeoutMs]),不是浏览器端够用的固定 700ms;
+/// - soft-apply 追平期间本地开始缓冲即放弃追平(浏览器端没有这一档:
+///   那边 seek 近乎瞬时,不存在"追平时播不动"的情况)。
 library;
 
 import 'dart:async';
 
 import 'common.dart';
 import 'models.dart';
+import 'soft_apply.dart';
 import 'video_ref.dart';
 
 // ---- 时间窗口常量(extension/src/content/index.ts) ----
@@ -434,6 +434,9 @@ bool videoIdsMayReferToSameVideo(String a, String b) {
 abstract interface class PlayerSyncSessionApi {
   String? get memberId;
   String? get roomCode;
+
+  /// 对时得到的往返时延,拉长 softApply 超时用(未对时前为空)。
+  double? get rttMs;
   bool get awaitingFreshRoomState;
   RoomState? get roomState;
   void sendPlaybackUpdate(PlaybackState playback);
@@ -503,6 +506,24 @@ class PlayerSyncEngine {
   /// 去抖中、尚未施加的远端暂停(见 [remotePauseDebounceMs])。
   PlaybackState? _deferredRemotePause;
   void Function()? _cancelDeferredRemotePause;
+
+  // ---- soft-apply 追平会话(soft_apply.dart 给出参数,这里是状态机) ----
+  String? _softApplyUrl;
+  double? _softApplyTargetTime;
+
+  /// 会话开始前的基准倍速,结束时调回它。
+  double? _softApplyRestoreRate;
+
+  /// 我们实际写下去的追平倍速。恢复前要确认播放器上仍是这个值——
+  /// 移动端的倍速变更目前不经过引擎(App 层没有 onLocalRateChanged 的
+  /// 调用点),对不上就说明是用户或别处改的,不能覆盖。
+  double? _softApplyAppliedRate;
+  bool _softApplyArmCooldown = false;
+  bool _softApplyConvergeByTime = false;
+  num _softApplyDeadline = 0;
+  void Function()? _cancelSoftApplyTimer;
+  String? _softApplyCooldownUrl;
+  num _softApplyCooldownUntil = 0;
   num _lastLocalIntentAt = 0;
   PlaybackPlayState? _lastLocalIntentPlayState;
   PlaybackVersion? _lastAppliedVersion;
@@ -584,6 +605,7 @@ class PlayerSyncEngine {
     // 换源:旧视频的 seek 目标与新视频的位置不可比,留着会误判到位
     _clearPendingProgrammaticSeek();
     _clearDeferredRemotePause();
+    _cancelSoftApply('reset');
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -621,6 +643,7 @@ class PlayerSyncEngine {
     // 播放器没了,等不到位置心跳确认到位,否则窗口会一直挂到超时
     _clearPendingProgrammaticSeek();
     _clearDeferredRemotePause();
+    _cancelSoftApply('reset');
     // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
     // 之后打开的任何视频都是手动选片,不得自动分享
     _clearSharedVideoNaturalEnd();
@@ -683,6 +706,13 @@ class PlayerSyncEngine {
     LocalPlaybackEventSource eventSource,
     LocalPlaybackSnapshot snapshot,
   ) {
+    // 移动端专属:追平期间又开始缓冲就放弃追平。缓冲时本来就播不快,
+    // 硬扛着加速会在恢复后冲过头(浏览器端没有这一档,seek 近乎瞬时)。
+    if (eventSource == LocalPlaybackEventSource.waiting) {
+      _cancelSoftApply('local-buffering');
+    } else if (snapshot.playState == PlaybackPlayState.paused) {
+      _cancelSoftApply('local-paused');
+    }
     if (_shouldSuppressAsEcho(eventSource, snapshot.playState)) {
       return;
     }
@@ -693,6 +723,7 @@ class PlayerSyncEngine {
   /// 在播且距上次广播超过 2s 才补发(playback-binding-controller.ts)。
   void onLocalPosition(LocalPlaybackSnapshot snapshot) {
     _settleProgrammaticSeek(snapshot.positionSeconds);
+    _maintainSoftApply(snapshot.positionSeconds);
     if (snapshot.playState != PlaybackPlayState.playing) {
       return;
     }
@@ -719,6 +750,8 @@ class PlayerSyncEngine {
     if (isInProgrammaticApplyWindow) {
       return;
     }
+    // 用户接管了倍速:放弃追平,且不要把基准倍速覆盖回去
+    _cancelSoftApply('user-ratechange');
     onUserGesture(ExplicitUserActionKind.ratechange);
     _broadcastPlayback(LocalPlaybackEventSource.ratechange, snapshot);
   }
@@ -845,6 +878,11 @@ class PlayerSyncEngine {
       return;
     }
     final now = _nowMs();
+    // 追平期间本地进度/倍速是故意调偏的,播出去会污染房间
+    if (_shouldSuppressBroadcastDuringSoftApply()) {
+      _log('Skip broadcast during soft-apply catch-up');
+      return;
+    }
     if (shouldSkipBroadcastWhileHydrating(
       pendingRoomStateHydration: pendingRoomStateHydration,
       now: now,
@@ -1080,20 +1118,50 @@ class PlayerSyncEngine {
       'delta=${reconcile.delta.toStringAsFixed(2)}',
     );
 
+    // 追平会话进行中被冷却压制:刚追平完不再响应中间档,否则会立刻被
+    // 下一拍重新触发(soft-apply-controller.ts: shouldSuppressByCooldown)
+    if (_shouldSuppressByCooldown(playback, reconcile.mode)) {
+      _log('Suppressed ${reconcile.mode.name} by soft-apply cooldown');
+      return;
+    }
+    if (_cancelReasonForPlayback(playback) case final reason?) {
+      _cancelSoftApply(reason);
+    }
+
+    // rateOnly 只动倍速;softApply 的进度修正是一小步(≤0.4s),不是跳帧
+    final softApplied = reconcile.mode == PlaybackReconcileMode.softApply
+        ? softApplySignature(
+            localCurrentTime: localSeconds,
+            targetTime: playback.currentTime,
+            basePlaybackRate: playback.playbackRate,
+          )
+        : null;
+    final catchUpRate = switch (reconcile.mode) {
+      PlaybackReconcileMode.rateOnly => rateAdjustedPlaybackRate(
+        localCurrentTime: localSeconds,
+        targetTime: playback.currentTime,
+        basePlaybackRate: playback.playbackRate,
+      ),
+      PlaybackReconcileMode.softApply => softApplied!.playbackRate,
+      _ => playback.playbackRate,
+    };
+
     final willSeek =
         reconcile.mode == PlaybackReconcileMode.softApply ||
         reconcile.mode == PlaybackReconcileMode.hardSeek;
     await _applyProgrammatically(playback.playState, () async {
       if (lastKnownRate != null &&
-          (lastKnownRate! - playback.playbackRate).abs() > 0.001) {
-        await port.setRate(playback.playbackRate);
+          (lastKnownRate! - catchUpRate).abs() > 0.001) {
+        await port.setRate(catchUpRate);
       }
       switch (reconcile.mode) {
         case PlaybackReconcileMode.ignore:
+          break;
         case PlaybackReconcileMode.rateOnly:
-          // v1:rateOnly 档漂移(0.45–0.9s)容忍,等下一拍收敛
+          // 只调速率(上面已写),不碰进度
           break;
         case PlaybackReconcileMode.softApply:
+          await port.seekTo(softApplied!.currentTime);
         case PlaybackReconcileMode.hardSeek:
           await port.seekTo(playback.currentTime);
       }
@@ -1108,7 +1176,216 @@ class PlayerSyncEngine {
         case PlaybackPlayState.paused:
           await port.pause();
       }
-    }, seekTarget: willSeek ? playback.currentTime : null);
+    }, seekTarget: willSeek
+        ? (softApplied?.currentTime ?? playback.currentTime)
+        : null);
+
+    // 中间两档要留一个会话:倍速被调高过,必须有东西负责把它调回去
+    switch (reconcile.mode) {
+      case PlaybackReconcileMode.rateOnly:
+        _startSoftApply(
+          playback: playback,
+          basePlaybackRate: playback.playbackRate,
+          isRealSoftApply: false,
+          appliedRate: catchUpRate,
+          // rateOnly 追不到快照目标(远端也在走),按相对漂移消化完计时恢复
+          restoreDelayMs: relativeDriftCloseMs(
+            driftSeconds: reconcile.delta,
+            rateOffsetSeconds: catchUpRate - playback.playbackRate,
+          ),
+        );
+      case PlaybackReconcileMode.softApply:
+        _startSoftApply(
+          playback: playback,
+          basePlaybackRate: playback.playbackRate,
+          isRealSoftApply: true,
+          appliedRate: catchUpRate,
+          restoreDelayMs: softApplyTimeoutMs(
+            remainingDriftSeconds:
+                (playback.currentTime - softApplied!.currentTime).abs(),
+            rttMs: session.rttMs,
+          ),
+        );
+      case PlaybackReconcileMode.ignore:
+      case PlaybackReconcileMode.hardSeek:
+        _cancelSoftApply('apply-${reconcile.mode.name}');
+    }
+  }
+
+  // -------------------------------------------------- soft-apply 追平会话
+
+  /// 开一个追平会话(soft-apply-controller.ts: upsertActiveSoftApply)。
+  ///
+  /// 同一视频上重复 upsert 会沿用最初的 [_softApplyRestoreRate]——中途的
+  /// playback.playbackRate 已经是被我们调过的值,拿它当基准会越调越偏。
+  /// [isRealSoftApply] 是 sticky 的:真 softApply 写过进度,收敛时要上冷却;
+  /// 纯 rateOnly 不上冷却,否则会压制下一次真正需要的远端对齐。
+  void _startSoftApply({
+    required PlaybackState playback,
+    required double basePlaybackRate,
+    required bool isRealSoftApply,
+    required double appliedRate,
+    required int restoreDelayMs,
+  }) {
+    final url = normalizeBilibiliUrl(playback.url);
+    if (url == null) {
+      return;
+    }
+    final sameSession = _softApplyUrl == url;
+    _cancelSoftApplyTimer?.call();
+    _softApplyUrl = url;
+    _softApplyTargetTime = playback.currentTime;
+    _softApplyRestoreRate = sameSession
+        ? _softApplyRestoreRate
+        : basePlaybackRate;
+    _softApplyArmCooldown = (sameSession && _softApplyArmCooldown) ||
+        isRealSoftApply;
+    // rateOnly 按经过时间恢复,softApply 按追到目标收敛(见 _maintainSoftApply)
+    _softApplyConvergeByTime = !isRealSoftApply;
+    _softApplyAppliedRate = appliedRate;
+    _softApplyDeadline = _nowMs() + restoreDelayMs;
+    _cancelSoftApplyTimer = _scheduleDelayed(
+      Duration(milliseconds: restoreDelayMs),
+      () {
+        _cancelSoftApplyTimer = null;
+        _cancelSoftApply(_softApplyConvergeByTime ? 'drift-closed' : 'timeout');
+      },
+    );
+    _log(
+      'Soft apply started url=$url '
+      'target=${playback.currentTime.toStringAsFixed(2)} '
+      'restoreRate=${_softApplyRestoreRate!.toStringAsFixed(2)} '
+      'timeout=$restoreDelayMs cooldown=$_softApplyArmCooldown',
+    );
+  }
+
+  bool get _hasActiveSoftApply => _softApplyUrl != null;
+
+  /// 结束会话:把倍速调回基准,必要时上冷却
+  /// (soft-apply-controller.ts: cancelActiveSoftApply)。
+  void _cancelSoftApply(String reason) {
+    if (!_hasActiveSoftApply) {
+      return;
+    }
+    final url = _softApplyUrl!;
+    final restoreRate = _softApplyRestoreRate;
+    final appliedRate = _softApplyAppliedRate;
+    final armCooldown = _softApplyArmCooldown;
+    _cancelSoftApplyTimer?.call();
+    _cancelSoftApplyTimer = null;
+    _softApplyUrl = null;
+    _softApplyTargetTime = null;
+    _softApplyRestoreRate = null;
+    _softApplyArmCooldown = false;
+    _softApplyConvergeByTime = false;
+    _softApplyAppliedRate = null;
+    _softApplyDeadline = 0;
+
+    // 只有播放器上仍是我们写下去的追平倍速时才恢复:对不上说明期间
+    // 被用户改过,覆盖回去等于吞掉用户的操作
+    final rateIsStillOurs =
+        appliedRate != null &&
+        lastKnownRate != null &&
+        (lastKnownRate! - appliedRate).abs() <= 0.01;
+    if (reason != 'user-ratechange' &&
+        rateIsStillOurs &&
+        restoreRate != null &&
+        (lastKnownRate! - restoreRate).abs() > 0.01) {
+      // 恢复动作本身会回流 ratechange,包进程序化窗口免得当成用户操作广播
+      _applyProgrammatically(
+        _programmaticApplyPlayState ?? PlaybackPlayState.playing,
+        () => port.setRate(restoreRate),
+      ).ignore();
+    }
+    if (armCooldown &&
+        const {'converged', 'timeout', 'drift-closed'}.contains(reason)) {
+      _softApplyCooldownUrl = url;
+      _softApplyCooldownUntil = _nowMs() + softApplyCooldownMs;
+    } else if (_softApplyCooldownUrl == url) {
+      _softApplyCooldownUrl = null;
+      _softApplyCooldownUntil = 0;
+    }
+    _log('Soft apply ended url=$url result=$reason');
+  }
+
+  /// 位置心跳驱动的收敛判定(soft-apply-controller.ts: maintainActiveSoftApply)。
+  void _maintainSoftApply(double positionSeconds) {
+    if (!_hasActiveSoftApply) {
+      return;
+    }
+    if (_nowMs() >= _softApplyDeadline) {
+      _cancelSoftApply(_softApplyConvergeByTime ? 'drift-closed' : 'timeout');
+      return;
+    }
+    // rateOnly 会话永远追不到那个快照目标,只按时间恢复
+    if (_softApplyConvergeByTime) {
+      return;
+    }
+    if ((positionSeconds - _softApplyTargetTime!).abs() <=
+        softApplyRecoveryThresholdSeconds) {
+      _cancelSoftApply('converged');
+    }
+  }
+
+  /// 远端状态是否让本次追平失去意义
+  /// (soft-apply-controller.ts: shouldCancelActiveSoftApplyForPlayback)。
+  String? _cancelReasonForPlayback(PlaybackState playback) {
+    if (!_hasActiveSoftApply) {
+      return null;
+    }
+    final url = normalizeBilibiliUrl(playback.url);
+    if (url == null || url != _softApplyUrl) {
+      return 'url-changed';
+    }
+    if (playback.playState != PlaybackPlayState.playing) {
+      return 'play-state-changed';
+    }
+    if (shouldTreatAsExplicitSeek(
+      syncIntent: playback.syncIntent,
+      playState: playback.playState,
+    )) {
+      return 'explicit-seek';
+    }
+    if (_softApplyRestoreRate != null &&
+        (playback.playbackRate - _softApplyRestoreRate!).abs() > 0.01) {
+      return 'rate-changed';
+    }
+    if ((playback.currentTime - _softApplyTargetTime!).abs() >
+        softApplyTargetShiftCancelThresholdSeconds) {
+      return 'target-shifted';
+    }
+    return null;
+  }
+
+  /// 冷却期内压制中间档(soft-apply-controller.ts: shouldSuppressByCooldown)。
+  bool _shouldSuppressByCooldown(
+    PlaybackState playback,
+    PlaybackReconcileMode mode,
+  ) {
+    if (_softApplyCooldownUntil <= _nowMs() || _softApplyCooldownUrl == null) {
+      return false;
+    }
+    if (normalizeBilibiliUrl(playback.url) != _softApplyCooldownUrl ||
+        playback.playState != PlaybackPlayState.playing ||
+        playback.syncIntent != null) {
+      return false;
+    }
+    return mode == PlaybackReconcileMode.rateOnly ||
+        mode == PlaybackReconcileMode.softApply;
+  }
+
+  /// 追平期间不广播本地状态:此时进度和倍速都是我们故意调偏的,
+  /// 播出去会污染房间(soft-apply-controller.ts:
+  /// shouldSuppressActiveSoftApplyBroadcast)。用户刚有手势时不压制。
+  bool _shouldSuppressBroadcastDuringSoftApply() {
+    if (!_hasActiveSoftApply || _nowMs() >= _softApplyDeadline) {
+      return false;
+    }
+    final action = lastExplicitUserAction;
+    if (action != null && _nowMs() - action.at < userGestureGraceMs) {
+      return false;
+    }
+    return true;
   }
 
   Future<void> _applyProgrammatically(
@@ -1178,6 +1455,7 @@ class PlayerSyncEngine {
     pendingRoomStateHydration = false;
     _clearPendingProgrammaticSeek();
     _clearDeferredRemotePause();
+    _cancelSoftApply('reset');
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;
