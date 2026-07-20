@@ -50,7 +50,6 @@ import 'package:PiliPlus/plugin/pl_player/widgets/common_btn.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/forward_seek.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/mpv_convert_webp.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/play_pause_btn.dart';
-import 'package:PiliPlus/sync_play/sync_play_service.dart';
 import 'package:PiliPlus/sync_play/ui/room_panel.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
@@ -450,15 +449,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         width: widgetWidth,
         height: 30,
         tooltip: 'Bili SyncPlay',
-        icon: ListenableBuilder(
-          listenable: SyncPlayService.to,
-          builder: (context, _) => Icon(
-            SyncPlayService.to.inRoom ? Icons.groups : Icons.groups_outlined,
-            size: 19,
-            color: SyncPlayService.to.inRoom
-                ? colorScheme.primary
-                : Colors.white,
-          ),
+        icon: const Icon(
+          Icons.groups_outlined,
+          size: 19,
+          color: Colors.white,
         ),
         onTap: () => SyncPlayRoomPanel.show(context),
       ),
