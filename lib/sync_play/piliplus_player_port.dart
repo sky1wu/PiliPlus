@@ -78,14 +78,17 @@ class PiliPlusPlayerPort implements SyncPlayPlayerPort {
       }
     }
 
-    // startPaused 不在导航参数里表达:目标页加载完成后 service 会
-    // requestSync 拉回权威房间状态,由引擎施加暂停/进度。
+    // autoPlay 强制目标页初始化播放器(用户关闭自动播放偏好时页面只显示
+    // 封面、播放器不建立,同步无法接管)。startPaused 不在导航参数里表达:
+    // 目标页加载完成后 service 会 requestSync 拉回权威房间状态,由引擎
+    // 施加暂停/进度。
     await PageUtils.toVideoPage(
       bvid: id,
       cid: cid,
       progress: (initialSeconds * 1000).round(),
       title: title,
       cover: cover,
+      extraArguments: const {'autoPlay': true},
     );
   }
 }

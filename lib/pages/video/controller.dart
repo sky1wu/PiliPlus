@@ -368,6 +368,11 @@ class VideoDetailController extends GetxController
     heroTag = args['heroTag'];
     cover = RxString(args['cover'] ?? '');
     isVertical = RxBool(args['isVertical'] ?? false);
+    // Bili-SyncPlay 跟随导航等场景强制自动播放:覆盖"关闭自动播放"偏好,
+    // 否则播放器不会初始化,同步引擎无法接管
+    if (args['autoPlay'] == true) {
+      _autoPlay.value = true;
+    }
 
     sourceType = args['sourceType'] ?? SourceType.normal;
     isFileSource = sourceType == SourceType.file;
