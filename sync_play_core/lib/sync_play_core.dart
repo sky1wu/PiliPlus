@@ -12,6 +12,7 @@ export 'src/client_messages.dart';
 export 'src/common.dart';
 export 'src/invite.dart';
 export 'src/models.dart';
+export 'src/pending_local_override.dart';
 export 'src/player_sync.dart';
 export 'src/server_messages.dart';
 export 'src/session.dart';

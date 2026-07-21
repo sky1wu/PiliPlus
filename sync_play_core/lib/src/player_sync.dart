@@ -23,6 +23,7 @@ import 'dart:async';
 
 import 'common.dart';
 import 'models.dart';
+import 'pending_local_override.dart';
 import 'soft_apply.dart';
 import 'video_ref.dart';
 
@@ -550,6 +551,9 @@ class PlayerSyncEngine {
   /// 内回流的 seek 事件能被认出来;没有下发过 seek 时为 null。
   double? _programmaticSeekTarget;
 
+  /// 登记中的本地显式操作(见 pending_local_override.dart)。
+  PendingLocalOverride? _pendingLocalOverride;
+
   /// 去抖中、尚未施加的远端暂停(见 [remotePauseDebounceMs])。
   PlaybackState? _deferredRemotePause;
   void Function()? _cancelDeferredRemotePause;
@@ -653,6 +657,7 @@ class PlayerSyncEngine {
     _clearPendingProgrammaticSeek();
     _clearDeferredRemotePause();
     _cancelSoftApply('reset');
+    _pendingLocalOverride = null;
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -698,6 +703,7 @@ class PlayerSyncEngine {
     _clearPendingProgrammaticSeek();
     _clearDeferredRemotePause();
     _cancelSoftApply('reset');
+    _pendingLocalOverride = null;
     // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
     // 之后打开的任何视频都是手动选片,不得自动分享
     _clearSharedVideoNaturalEnd();
@@ -1015,6 +1021,19 @@ class PlayerSyncEngine {
     );
     _lastBroadcastAt = now;
     _lastLocalPlaybackVersion = (serverTime: 0, seq: _seq);
+    // 显式 seek/改倍速要挂守卫:本地落地前,房间里还在流转操作之前的状态
+    final pending = rememberPendingLocalOverride(
+      payload: payload,
+      now: now,
+      followsUserRatechange:
+          lastExplicitUserAction != null &&
+          lastExplicitUserAction!.kind == ExplicitUserActionKind.ratechange &&
+          now - lastExplicitUserAction!.at < userGestureGraceMs,
+    );
+    if (pending != null) {
+      _pendingLocalOverride = pending;
+      _log('Pending local override ${pending.kind.name} seq=${pending.seq}');
+    }
     session.sendPlaybackUpdate(payload);
   }
 
@@ -1130,6 +1149,21 @@ class PlayerSyncEngine {
       pendingRoomStateHydration = false;
       return;
     }
+    final overrideDecision = decidePendingLocalOverride(
+      pending: _pendingLocalOverride,
+      playback: playback,
+      localMemberId: session.memberId,
+      now: _nowMs(),
+    );
+    _pendingLocalOverride = overrideDecision.nextPending;
+    if (overrideDecision.shouldIgnore) {
+      // 本地显式操作尚未落地:此刻的远端状态是操作之前的,施加会把用户
+      // 刚跳到的位置拽回去
+      _log('Ignored remote playback: ${overrideDecision.reason}');
+      pendingRoomStateHydration = false;
+      return;
+    }
+
     if (_shouldDeferRemotePause(playback)) {
       // hydration 有意保持 true 到延迟的快照真正施加为止
       // (room-state-apply-controller.ts 同一处的注释):否则这 250ms 里
@@ -1564,6 +1598,7 @@ class PlayerSyncEngine {
     _clearPendingProgrammaticSeek();
     _clearDeferredRemotePause();
     _cancelSoftApply('reset');
+    _pendingLocalOverride = null;
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;
