@@ -37,6 +37,7 @@ class SyncPlayService extends ChangeNotifier {
       log: _debugLog,
     );
     engine = PlayerSyncEngine(session: session, port: port, log: _debugLog);
+    port.isPlayerAttached = () => _playerAttached;
     PlPlayerController.syncPlayDataSourceListeners.add(_onDataSource);
     PlPlayerController.syncPlaySeekListeners.add(_onSeek);
     PlPlayerController.syncPlayUserToggleListeners.add(_onUserToggle);

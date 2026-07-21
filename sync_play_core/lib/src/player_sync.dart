@@ -631,6 +631,13 @@ class PlayerSyncEngine {
       pendingRoomStateHydration = true;
       _maybeAutoShareAsSharer();
     }
+    // 已经在共享视频上(自己就是分享者,或采纳了房间身份)就登记防重导航记录。
+    // 只在导航路径里登记的话,从未导航过的一端(分享者)这个值一直是 null,
+    // 之后手动打开别的视频时,下一个 room:state 会把共享视频重新压回栈顶。
+    if (normalizedShared != null &&
+        currentVideo?.normalizedUrl == normalizedShared) {
+      _lastOpenedSharedUrl = normalizedShared;
+    }
   }
 
   /// 播放器随视频页销毁(用户离开视频页回到非视频页面):清除本地
@@ -1481,6 +1488,8 @@ class PlayerSyncEngine {
       );
       _lastLocalPlaybackVersion = (serverTime: 0, seq: _seq);
     }
+    // 分享者本来就在这个视频上,同样要登记,否则之后切走会被拉回来
+    _lastOpenedSharedUrl = video.normalizedUrl;
     _log('Sharing ${video.normalizedUrl}');
     session.shareVideo(shared, playback: playback);
   }

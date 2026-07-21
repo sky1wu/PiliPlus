@@ -583,6 +583,24 @@ void main() {
       expect(harness.port.calls, isEmpty);
     });
 
+    test('registers the shared url so the sharer is not navigated back',
+        () async {
+      final harness = EngineHarness();
+      harness.engine
+        ..onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42, title: 'Video')
+        ..shareCurrentVideo();
+      expect(harness.session.sharedVideos, hasLength(1));
+
+      // 分享者从未走过导航,防重记录若不登记就一直是 null —— 之后切到
+      // 别的视频时,下一个 room:state 会把共享视频重新压回栈顶
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', cid: 99);
+      final state = roomState(playback: playback(currentTime: 30, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      expect(harness.port.calls.join(), isNot(contains('openVideo')));
+    });
+
     test('pauses on a buffering initial room state', () async {
       final harness = EngineHarness();
       harness.engine.onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42);

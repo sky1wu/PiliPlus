@@ -1460,6 +1460,12 @@ class PlPlayerController with BlockConfigMixin {
   static final Set<void Function(PlPlayerController player, bool buffering)>
   syncPlayBufferingListeners = {};
 
+  /// 未起播页面的起播入口(视频页注册 handlePlay)。
+  ///
+  /// 未起播时页面只有封面、播放器尚未建立,对它 play() 是空操作 ——
+  /// 同步引擎要让这一端跟着播,必须走页面的完整起播流程。
+  static Future<void>? Function()? syncPlayStartPlayback;
+
   /// 通知同步钩子"这是一次用户主动的播放/暂停手势"。
   /// 播放器控件内的入口是 [onDoubleTapCenter];封面上的播放按钮走的是
   /// 视频页的 handlePlay,不经过这里,需要它自己调一次。

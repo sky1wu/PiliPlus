@@ -18,8 +18,20 @@ class PiliPlusPlayerPort implements SyncPlayPlayerPort {
     await _player?.seekTo(Duration(milliseconds: (seconds * 1000).round()));
   }
 
+  /// 本端是否已有播放器挂到同步(SyncPlayService 注入)。
+  bool Function()? isPlayerAttached;
+
   @override
   Future<void> play() async {
+    // 未起播的页面只有封面、播放器还没建立,play() 是空操作:走页面
+    // 注册的完整起播流程,否则这一端永远跟不上对端的播放
+    if (isPlayerAttached?.call() == false) {
+      final start = PlPlayerController.syncPlayStartPlayback;
+      if (start != null) {
+        await start();
+        return;
+      }
+    }
     await _player?.play();
   }
 

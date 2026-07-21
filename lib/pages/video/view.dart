@@ -178,6 +178,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         ..addPositionListener(positionListener);
     } else {
       _attachSyncPlayPageVideo();
+      // 未起播:同步引擎要让本端跟播时,得走完整起播流程而不是 play()
+      PlPlayerController.syncPlayStartPlayback = handlePlay;
     }
   }
 
@@ -331,6 +333,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     // 没有这个手势记录的话,起播后的广播会被 hydration 守卫整条吞掉,
     // 对端就永远等不到播放状态。
     plPlayerController.notifySyncPlayUserToggle();
+    PlPlayerController.syncPlayStartPlayback = null;
     videoDetailController.autoPlay = true;
     plPlayerController
       ..addStatusLister(playerListener)
@@ -384,6 +387,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     if (plPlayerController == null) {
       // 始终未起播:没有播放器 dispose 钩子来清 SyncPlay 的视频上下文
       SyncPlayService.to.detachPageVideo();
+    }
+    if (PlPlayerController.syncPlayStartPlayback == handlePlay) {
+      PlPlayerController.syncPlayStartPlayback = null;
     }
     removeObserverMobile(this);
 
