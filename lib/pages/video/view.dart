@@ -332,10 +332,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     // 主动播放"的信号。而紧接着的 setDataSource 会重新拉起 hydration 窗口,
     // 没有这个手势记录的话,起播后的广播会被 hydration 守卫整条吞掉,
     // 对端就永远等不到播放状态。
-    plPlayerController.notifySyncPlayUserToggle();
     PlPlayerController.syncPlayStartPlayback = null;
     videoDetailController.autoPlay = true;
     plPlayerController
+      ..notifySyncPlayUserToggle()
       ..addStatusLister(playerListener)
       ..addPositionListener(positionListener);
     if (plPlayerController.preInitPlayer) {
