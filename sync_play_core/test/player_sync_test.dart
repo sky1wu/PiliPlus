@@ -661,6 +661,57 @@ void main() {
       expect(harness.port.calls, isEmpty);
     });
 
+    test('holds a non-sharer when the shared video ends', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.now += remotePlayTransitionGuardMs + 100;
+
+      // 共享者是 member-2,本端是 member-1:播完不能让播放器自己连播走
+      harness.engine.onLocalEnded(harness.snapshot(position: 600));
+      expect(harness.port.calls, contains('pause'));
+      expect(harness.session.playbackUpdates, isEmpty);
+
+      // 播放器仍挣脱去播下一个:再按一次
+      harness.port.calls.clear();
+      harness.engine.onLocalPlayStateChanged(
+        LocalPlaybackEventSource.playing,
+        harness.snapshot(position: 0),
+      );
+      expect(harness.port.calls, contains('pause'));
+      expect(harness.session.playbackUpdates, isEmpty);
+    });
+
+    test('defers the sharer end state until no autoplay follows', () async {
+      final harness = EngineHarness();
+      harness.session.roomState = roomState(
+        sharedVideo: const SharedVideo(
+          videoId: 'BV1xx411c7mD:42',
+          url: sharedUrl,
+          title: 'Video',
+          sharedByMemberId: 'member-1',
+        ),
+        playback: playback(currentTime: 30, actorId: 'member-1'),
+      );
+      harness.engine
+        ..onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42, title: 'Video')
+        ..lastKnownPositionSeconds = 30
+        ..lastKnownRate = 1
+        ..pendingRoomStateHydration = false;
+      harness.now += remotePlayTransitionGuardMs + 100;
+      harness.session.playbackUpdates.clear();
+
+      // 自己是分享者:播完先压住,别把 pause / 跳回 0 播出去
+      harness.engine.onLocalEnded(harness.snapshot(position: 600));
+      expect(harness.session.playbackUpdates, isEmpty);
+
+      // 窗口内没有连播接上:补发终态
+      expect(await harness.fireDeferred(), 1);
+      expect(harness.session.playbackUpdates, hasLength(1));
+      final update = harness.session.playbackUpdates.single;
+      expect(update.playState, PlaybackPlayState.paused);
+      expect(update.naturalEnd, isTrue);
+    });
+
     test('registers the shared url so the sharer is not navigated back',
         () async {
       final harness = EngineHarness();

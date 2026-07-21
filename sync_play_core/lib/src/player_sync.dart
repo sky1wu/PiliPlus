@@ -3,10 +3,14 @@
 /// (playback-apply.ts / playback-reconcile.ts / playback-broadcast.ts)
 /// 与 sync-controller.ts 的关键守卫窗口。
 ///
-/// v1 相对浏览器端的显式简化(涉及行为差异的都在此声明):
+/// 相对浏览器端的显式简化(涉及行为差异的都在此声明):
 /// - 无 buffer-pause 升级分类:宿主播放器(PlPlayer)有独立 buffering 信号,
 ///   由桥接层映射成 `buffering` 播放态与 `waiting` 事件源传入;
-/// - 无 festival/watchlater 特例:App 内路由不存在该形态。
+/// - 无 festival/watchlater 特例:App 内路由不存在该形态;
+/// - 无 gesture-tracker.ts 的"手势是否落在播放器内"判定:浏览器端的手势
+///   追踪是 document 级的,要把播放器上的点击和页面空白处的杂散点击分开;
+///   App 侧手势只从播放/暂停、进度条、倍速三个显式钩子进来,按构造就都是
+///   播放器内手势,不存在杂散来源。
 ///
 /// 相对浏览器端的移动端专属处理:
 /// - 程序化 seek 的回声窗口按"位置真正到位"关闭(见
@@ -546,6 +550,17 @@ class PlayerSyncEngine {
   /// 最近一次本地显式播放/暂停动作(带播放态,区别于 lastExplicitUserAction)。
   ExplicitPlaybackAction? lastExplicitPlaybackAction;
 
+  // ---- 共享视频自然播完时的两套处理(playback-binding-controller.ts) ----
+  /// 非分享者:播完后本地被强制停住的共享 URL 与截止时刻。
+  String? _suppressedLocalEndPauseUrl;
+  num _suppressedLocalEndPauseUntil = 0;
+
+  /// 分享者:播完后压制广播的共享 URL、截止时刻与布防时刻。
+  String? _sharerEndedSuppressionUrl;
+  num _sharerEndedSuppressionUntil = 0;
+  num _sharerEndedSuppressionArmedAt = 0;
+  void Function()? _cancelSharerEndedFlush;
+
   /// 去抖中、尚未施加的远端暂停(见 [remotePauseDebounceMs])。
   PlaybackState? _deferredRemotePause;
   void Function()? _cancelDeferredRemotePause;
@@ -660,6 +675,9 @@ class PlayerSyncEngine {
     _remoteFollowPlayingUrl = null;
     _pauseHoldUntil = 0;
     _programmaticApplySignature = null;
+    _clearSharerEndedSuppression();
+    _suppressedLocalEndPauseUrl = null;
+    _suppressedLocalEndPauseUntil = 0;
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -712,6 +730,9 @@ class PlayerSyncEngine {
     _remoteFollowPlayingUrl = null;
     _pauseHoldUntil = 0;
     _programmaticApplySignature = null;
+    _clearSharerEndedSuppression();
+    _suppressedLocalEndPauseUrl = null;
+    _suppressedLocalEndPauseUntil = 0;
     // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
     // 之后打开的任何视频都是手动选片,不得自动分享
     _clearSharedVideoNaturalEnd();
@@ -786,6 +807,19 @@ class PlayerSyncEngine {
     } else if (snapshot.playState == PlaybackPlayState.paused) {
       _cancelSoftApply('local-paused');
     }
+    // 非分享者被按停后播放器仍连播了下一个:再按一次
+    // (playback-binding-controller.ts: shouldReapplyHoldAfterSharedVideoEnd)
+    if (snapshot.playState == PlaybackPlayState.playing &&
+        _suppressedLocalEndPauseUrl != null &&
+        _nowMs() < _suppressedLocalEndPauseUntil &&
+        currentVideo?.normalizedUrl == _suppressedLocalEndPauseUrl &&
+        intendedPlayState != PlaybackPlayState.playing &&
+        _nowMs() - lastUserGestureAt >= userGestureGraceMs) {
+      _log('Re-holding non-sharer after the shared video ended');
+      lastForcedPauseAt = _nowMs();
+      _forcePause();
+      return;
+    }
     if (_shouldSuppressAsEcho(eventSource, snapshot)) {
       return;
     }
@@ -834,11 +868,96 @@ class PlayerSyncEngine {
   /// markSharedVideoNaturalEnd)。
   void onLocalEnded(LocalPlaybackSnapshot snapshot) {
     _markSharedVideoNaturalEnd();
+    final sharedUrl = _normalizedSharedUrl();
+    final onSharedVideo =
+        sharedUrl != null && currentVideo?.normalizedUrl == sharedUrl;
+    final sharerId = session.roomState?.sharedVideo?.sharedByMemberId;
+    final isSharer = sharerId != null && sharerId == session.memberId;
+
+    if (onSharedVideo && !isSharer) {
+      // 非分享者:共享视频播完后播放器会自己连播下一个,那会把本端带离
+      // 房间的视频。停住并按住,等分享者决定下一个放什么
+      // (playback-binding-controller.ts: holdNonSharerAtSharedVideoEnd)
+      intendedPlayState = PlaybackPlayState.paused;
+      lastForcedPauseAt = _nowMs();
+      _suppressedLocalEndPauseUrl = sharedUrl;
+      _suppressedLocalEndPauseUntil = _nowMs() + initialRoomStatePauseHoldMs;
+      _pauseHoldUntil = _nowMs() + initialRoomStatePauseHoldMs;
+      _log('Held non-sharer at the end of the shared video');
+      _forcePause();
+      return;
+    }
+
+    if (onSharedVideo && isSharer) {
+      // 分享者:自然播完时浏览器/播放器会先发一个 pause,连播下一个还会
+      // seek 回 0,把这两下播出去,对端会先看到"暂停"再看到"跳到 0:00",
+      // 紧接着才是"共享了新视频"。压住,若没有连播再补发终态
+      // (playback-binding-controller.ts: armSharerEndedSuppression)
+      _armSharerEndedSuppression(sharedUrl, snapshot);
+      return;
+    }
+
     _broadcastPlayback(LocalPlaybackEventSource.ended, (
       positionSeconds: snapshot.positionSeconds,
       playState: PlaybackPlayState.paused,
       playbackRate: snapshot.playbackRate,
     ), naturalEnd: true);
+  }
+
+  void _armSharerEndedSuppression(
+    String sharedUrl,
+    LocalPlaybackSnapshot snapshot,
+  ) {
+    _cancelSharerEndedFlush?.call();
+    _sharerEndedSuppressionUrl = sharedUrl;
+    _sharerEndedSuppressionUntil = _nowMs() + initialRoomStatePauseHoldMs;
+    _sharerEndedSuppressionArmedAt = _nowMs();
+    _log('Suppressed sharer end-of-video broadcasts');
+    _cancelSharerEndedFlush = _scheduleDelayed(
+      const Duration(milliseconds: initialRoomStatePauseHoldMs),
+      () {
+        _cancelSharerEndedFlush = null;
+        if (_sharerEndedSuppressionUrl != sharedUrl) {
+          return;
+        }
+        _clearSharerEndedSuppression();
+        // 窗口内没有连播接上:补发终态,否则对端会一直以为还在播
+        if (_normalizedSharedUrl() != sharedUrl ||
+            currentVideo?.normalizedUrl != sharedUrl) {
+          return;
+        }
+        _log('Flushed the sharer end-of-video paused state');
+        _broadcastPlayback(LocalPlaybackEventSource.ended, (
+          positionSeconds: snapshot.positionSeconds,
+          playState: PlaybackPlayState.paused,
+          playbackRate: snapshot.playbackRate,
+        ), naturalEnd: true);
+      },
+    );
+  }
+
+  void _clearSharerEndedSuppression() {
+    _cancelSharerEndedFlush?.call();
+    _cancelSharerEndedFlush = null;
+    _sharerEndedSuppressionUrl = null;
+    _sharerEndedSuppressionUntil = 0;
+    _sharerEndedSuppressionArmedAt = 0;
+  }
+
+  /// 分享者播完后的广播压制是否仍然生效。用户新的手势(晚于布防时刻)
+  /// 会解除它——那是重播意图,不该继续压着。
+  bool _isSharerEndSuppressed(String? normalizedCurrentUrl, num now) {
+    if (_sharerEndedSuppressionUrl == null ||
+        now >= _sharerEndedSuppressionUntil ||
+        normalizedCurrentUrl != _sharerEndedSuppressionUrl) {
+      return false;
+    }
+    if (lastUserGestureAt > _sharerEndedSuppressionArmedAt &&
+        now - lastUserGestureAt < userGestureGraceMs) {
+      _clearSharerEndedSuppression();
+      return false;
+    }
+    return true;
   }
 
   void _markSharedVideoNaturalEnd() {
@@ -946,6 +1065,9 @@ class PlayerSyncEngine {
     );
     if (decision.clearWindow) {
       _programmaticApplySignature = null;
+    _clearSharerEndedSuppression();
+    _suppressedLocalEndPauseUrl = null;
+    _suppressedLocalEndPauseUntil = 0;
     }
     if (decision.shouldSuppress) {
       _log('Suppressed programmatic echo $eventSource');
@@ -1005,6 +1127,11 @@ class PlayerSyncEngine {
     _remoteFollowPlayingUrl = followup.nextUrl;
     if (followup.shouldSuppress) {
       _log('Skip broadcast: following remote playback');
+      return;
+    }
+
+    if (_isSharerEndSuppressed(normalizedCurrent, now)) {
+      _log('Skip broadcast: sharer end-of-video handoff');
       return;
     }
 
@@ -1148,6 +1275,16 @@ class PlayerSyncEngine {
     if (_sharedVideoNaturalEndUrl != null &&
         _sharedVideoNaturalEndUrl != normalizedSharedUrl) {
       _clearSharedVideoNaturalEnd();
+    }
+    // 换了共享视频:上一个的播完压制/按停标记都作废
+    if (_sharerEndedSuppressionUrl != null &&
+        _sharerEndedSuppressionUrl != normalizedSharedUrl) {
+      _clearSharerEndedSuppression();
+    }
+    if (_suppressedLocalEndPauseUrl != null &&
+        _suppressedLocalEndPauseUrl != normalizedSharedUrl) {
+      _suppressedLocalEndPauseUrl = null;
+      _suppressedLocalEndPauseUntil = 0;
     }
 
     if (sharedVideo != null && normalizedSharedUrl != null) {
@@ -1752,6 +1889,9 @@ class PlayerSyncEngine {
     _remoteFollowPlayingUrl = null;
     _pauseHoldUntil = 0;
     _programmaticApplySignature = null;
+    _clearSharerEndedSuppression();
+    _suppressedLocalEndPauseUrl = null;
+    _suppressedLocalEndPauseUntil = 0;
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;
