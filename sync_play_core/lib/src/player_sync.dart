@@ -512,6 +512,10 @@ class PlayerSyncEngine {
   double? _pendingProgrammaticSeekTarget;
   num _pendingProgrammaticSeekDeadline = 0;
 
+  /// 最近一次**我们下发过**的 seek 目标。到位后仍保留,让常规回声窗口
+  /// 内回流的 seek 事件能被认出来;没有下发过 seek 时为 null。
+  double? _programmaticSeekTarget;
+
   /// 去抖中、尚未施加的远端暂停(见 [remotePauseDebounceMs])。
   PlaybackState? _deferredRemotePause;
   void Function()? _cancelDeferredRemotePause;
@@ -827,6 +831,7 @@ class PlayerSyncEngine {
     final now = _nowMs();
     if ((positionSeconds - target).abs() <=
         programmaticSeekSettleToleranceSeconds) {
+      // 只清 pending:_programmaticSeekTarget 留给随后的常规回声窗口
       _pendingProgrammaticSeekTarget = null;
       // 到位瞬间仍会回流 playing/canplay 等事件,留常规窗口盖住
       _programmaticApplyUntil = now + programmaticApplyWindowMs;
@@ -840,6 +845,7 @@ class PlayerSyncEngine {
   void _clearPendingProgrammaticSeek() {
     _pendingProgrammaticSeekTarget = null;
     _pendingProgrammaticSeekDeadline = 0;
+    _programmaticSeekTarget = null;
   }
 
   /// seek 回声判定。等待程序化 seek 落地期间用户又拖了进度条时,新位置
@@ -849,10 +855,17 @@ class PlayerSyncEngine {
     if (!isInProgrammaticApplyWindow) {
       return false;
     }
-    final target = _pendingProgrammaticSeekTarget;
-    if (target != null &&
-        (positionSeconds - target).abs() >
-            programmaticSeekSettleToleranceSeconds) {
+    final target = _programmaticSeekTarget;
+    // 我们没下发过 seek,回流的 seek 就不可能是它的回声 —— 必须放行。
+    // 回声窗口在每次远端施加后都会续 700ms,包括 ignore/rateOnly 这些
+    // 根本不 seek 的档;稳态下房间状态约 2s 一拍,无条件吞掉的话用户
+    // 拖进度条有很大概率被整条吃掉:手势不记录、广播不发出,之后的心跳
+    // 带着已跳变的位置和空 syncIntent 发出去,对端只当成普通漂移慢慢追。
+    if (target == null) {
+      return false;
+    }
+    if ((positionSeconds - target).abs() >
+        programmaticSeekSettleToleranceSeconds) {
       _clearPendingProgrammaticSeek();
       _programmaticApplyUntil = 0;
       return false;
@@ -1472,6 +1485,7 @@ class PlayerSyncEngine {
         // seekTo() 返回不代表播放器已到位,继续等位置心跳确认
         _pendingProgrammaticSeekTarget = seekTarget;
         _pendingProgrammaticSeekDeadline = now + programmaticSeekSettleTimeoutMs;
+        _programmaticSeekTarget = seekTarget;
       }
     }
   }

@@ -563,6 +563,31 @@ void main() {
       expect(harness.session.playbackUpdates, isEmpty);
     });
 
+    test('a user seek after a non-seeking apply is not swallowed', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine
+        ..lastKnownPositionSeconds = 30
+        ..lastKnownRate = 1;
+
+      // 0.7s 漂移 → rateOnly:只调速率,没有下发任何 seek,
+      // 但回声窗口照样续了 700ms
+      final state = roomState(playback: playback(currentTime: 30.7, seq: 5));
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+      expect(harness.engine.isInProgrammaticApplyWindow, isTrue);
+      harness.session.playbackUpdates.clear();
+
+      // 用户此时拖进度条:我们没下发过 seek,这就不可能是回声
+      harness.engine.onLocalSeek(harness.snapshot(position: 200));
+      expect(harness.session.playbackUpdates, hasLength(1));
+      expect(
+        harness.session.playbackUpdates.single.syncIntent,
+        PlaybackSyncIntent.explicitSeek,
+      );
+      expect(harness.session.playbackUpdates.single.currentTime, 200);
+    });
+
     test('aligns to a seek target even while the peer buffers', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
