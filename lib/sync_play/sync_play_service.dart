@@ -307,13 +307,12 @@ class SyncPlayService extends ChangeNotifier {
       return;
     }
     final seconds = position.inMilliseconds / 1000;
+    final player = PlPlayerController.instance;
     engine
       ..lastKnownPositionSeconds = seconds
-      ..isLocalPaused = !(PlPlayerController.instance?.playerStatus.value
-              .isPlaying ??
-          false);
-    engine.lastKnownRate = PlPlayerController.instance?.playbackSpeed;
-    engine.onLocalPosition(_snapshot(positionSeconds: seconds));
+      ..isLocalPaused = !(player?.playerStatus.value.isPlaying ?? false)
+      ..lastKnownRate = player?.playbackSpeed
+      ..onLocalPosition(_snapshot(positionSeconds: seconds));
   }
 
   void _onStatus(PlayerStatus status) {
