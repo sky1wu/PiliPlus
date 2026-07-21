@@ -602,6 +602,14 @@ class PlayerSyncEngine {
   /// 连播条件已满足但标题尚未就绪,等 [onTitleResolved] 补发分享。
   bool _pendingAutoShareOnTitle = false;
 
+  /// 已经自动分享出去、但房间还没确认的下一个视频 URL
+  /// (runtime-state.ts: pendingAutoShareTargetUrl)。
+  ///
+  /// 连播 A→B→C 时,C 加载的那一刻房间的共享视频可能还停在 A(B 的
+  /// room:state 没回来)。只拿 roomState 里的 URL 当"上一个"判定的话,
+  /// 这一环会被当成手动切片而中断整条连播链。
+  String? _pendingAutoShareTargetUrl;
+
   /// 本地播放器当前是否暂停(桥接层随状态回调写入)。
   bool _isLocalPaused = true;
   set isLocalPaused(bool value) => _isLocalPaused = value;
@@ -1276,6 +1284,11 @@ class PlayerSyncEngine {
         _sharedVideoNaturalEndUrl != normalizedSharedUrl) {
       _clearSharedVideoNaturalEnd();
     }
+    // 房间确认了我们分享的目标(或换了别人分享):在途标记作废
+    if (_pendingAutoShareTargetUrl != null &&
+        _pendingAutoShareTargetUrl == normalizedSharedUrl) {
+      _pendingAutoShareTargetUrl = null;
+    }
     // 换了共享视频:上一个的播完压制/按停标记都作废
     if (_sharerEndedSuppressionUrl != null &&
         _sharerEndedSuppressionUrl != normalizedSharedUrl) {
@@ -1871,6 +1884,8 @@ class PlayerSyncEngine {
     }
     // 分享者本来就在这个视频上,同样要登记,否则之后切走会被拉回来
     _lastOpenedSharedUrl = video.normalizedUrl;
+    // 房间确认前先记住:紧接着的下一环连播要靠它认出这是链式的
+    _pendingAutoShareTargetUrl = video.normalizedUrl;
     _log('Sharing ${video.normalizedUrl}');
     session.shareVideo(shared, playback: playback);
   }
@@ -1892,6 +1907,7 @@ class PlayerSyncEngine {
     _clearSharerEndedSuppression();
     _suppressedLocalEndPauseUrl = null;
     _suppressedLocalEndPauseUntil = 0;
+    _pendingAutoShareTargetUrl = null;
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;
@@ -1918,7 +1934,15 @@ class PlayerSyncEngine {
     if (sharedUrl == null || currentVideo?.normalizedUrl == sharedUrl) {
       return;
     }
-    if (!_isAutoplayContinuationFrom(sharedUrl)) {
+    // 链式连播:上一环刚分享出去、房间还没确认,此刻 roomState 里仍是
+    // 更早的那个视频。两个都认,否则 A→B→C 会在 C 这里断掉。
+    final continuedFrom = _isAutoplayContinuationFrom(sharedUrl)
+        ? sharedUrl
+        : (_pendingAutoShareTargetUrl != null &&
+                  _isAutoplayContinuationFrom(_pendingAutoShareTargetUrl!)
+              ? _pendingAutoShareTargetUrl
+              : null);
+    if (continuedFrom == null) {
       _log('Skip auto-share: not an autoplay continuation of $sharedUrl');
       return;
     }

@@ -661,6 +661,36 @@ void main() {
       expect(harness.port.calls, isEmpty);
     });
 
+    test('keeps a chained autoplay going before the room confirms', () async {
+      final harness = EngineHarness();
+      const sharedA = SharedVideo(
+        videoId: 'BV1xx411c7mD:42',
+        url: sharedUrl,
+        title: 'A',
+        sharedByMemberId: 'member-1',
+      );
+      harness.session.roomState = roomState(
+        sharedVideo: sharedA,
+        playback: playback(actorId: 'member-1'),
+      );
+      harness.engine
+        ..onVideoLoaded(bvid: 'BV1xx411c7mD', cid: 42, title: 'A')
+        ..pendingRoomStateHydration = false;
+
+      // A 播完 → 连播 B,自动分享出去
+      harness.engine.onLocalEnded(harness.snapshot(position: 600));
+      harness.engine.onVideoLoaded(bvid: 'BV1ab411c7mD', cid: 99, title: 'B');
+      expect(harness.session.sharedVideos, hasLength(1));
+      expect(harness.session.sharedVideos.single.title, 'B');
+
+      // B 播完 → 连播 C,但房间的 room:state 还停在 A。
+      // 只看 roomState 的话这一环会被当成手动切片而断链。
+      harness.engine.onLocalEnded(harness.snapshot(position: 600));
+      harness.engine.onVideoLoaded(bvid: 'BV1cd411c7mD', cid: 100, title: 'C');
+      expect(harness.session.sharedVideos, hasLength(2));
+      expect(harness.session.sharedVideos.last.title, 'C');
+    });
+
     test('holds a non-sharer when the shared video ends', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
