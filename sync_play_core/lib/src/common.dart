@@ -61,3 +61,24 @@ abstract final class SyncPlayErrorCode {
       'unsupported_protocol_version';
   static const String internalError = 'internal_error';
 }
+
+/// 本地播放事件来源(runtime-state.ts: LocalPlaybackEventSource 的移动端子集)。
+enum LocalPlaybackEventSource {
+  play,
+  playing,
+  pause,
+  /// 播放中断流缓冲(浏览器端的 `waiting` 事件;移动端由宿主播放器的
+  /// isBuffering 信号驱动)。
+  waiting,
+  seeking,
+  seeked,
+  canplay,
+  ratechange,
+  timeupdate,
+  ended,
+  manual,
+}
+
+enum ExplicitUserActionKind { play, pause, seek, ratechange }
+
+typedef ExplicitUserAction = ({ExplicitUserActionKind kind, num at});

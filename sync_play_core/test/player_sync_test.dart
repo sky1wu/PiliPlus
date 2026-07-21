@@ -429,9 +429,10 @@ void main() {
         );
         expect(harness.session.playbackUpdates, isEmpty);
 
-        // 位置到位后收敛回常规窗口,过期即恢复广播
+        // 位置到位后收敛回常规窗口。还要等"跟随远端播放"窗口一并过期
+        // ——那期间本地回流的 playing 是噪音,上游同样压制
         harness.engine.onLocalPosition(harness.snapshot(position: 30));
-        harness.now += programmaticApplyWindowMs + 100;
+        harness.now += remotePlayTransitionGuardMs + 100;
         expect(harness.engine.isInProgrammaticApplyWindow, isFalse);
         harness.engine.onLocalPlayStateChanged(
           LocalPlaybackEventSource.playing,
@@ -591,7 +592,8 @@ void main() {
     test('a stall right after a user seek is broadcast as playing', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
-      harness.now += programmaticApplyWindowMs + 100;
+      // 越过跟随远端播放的窗口,单独验证播放态覆盖
+      harness.now += remotePlayTransitionGuardMs + 100;
       harness.engine
         ..intendedPlayState = PlaybackPlayState.playing
         ..onUserGesture(ExplicitUserActionKind.seek);
@@ -813,7 +815,7 @@ void main() {
     test('broadcasts buffering as a stop-like state', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
-      harness.now += programmaticApplyWindowMs + 100;
+      harness.now += remotePlayTransitionGuardMs + 100;
 
       harness.engine.onLocalPlayStateChanged(
         LocalPlaybackEventSource.waiting,
@@ -956,7 +958,8 @@ void main() {
       () async {
         final harness = EngineHarness();
         await harness.loadSharedVideoAndHydrate();
-        harness.now += programmaticApplyWindowMs + 100;
+        // 跟随远端播放的窗口内心跳本就该压制,越过它再验证节流
+        harness.now += remotePlayTransitionGuardMs + 100;
 
         harness.engine.onLocalPosition(harness.snapshot(position: 31));
         expect(harness.session.playbackUpdates, hasLength(1));

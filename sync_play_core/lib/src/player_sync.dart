@@ -24,6 +24,7 @@ import 'dart:async';
 import 'common.dart';
 import 'models.dart';
 import 'pending_local_override.dart';
+import 'sync_guards.dart';
 import 'soft_apply.dart';
 import 'video_ref.dart';
 
@@ -72,26 +73,6 @@ void Function() _defaultDelayScheduler(Duration delay, void Function() task) {
   return timer.cancel;
 }
 
-/// 本地播放事件来源(runtime-state.ts: LocalPlaybackEventSource 的移动端子集)。
-enum LocalPlaybackEventSource {
-  play,
-  playing,
-  pause,
-  /// 播放中断流缓冲(浏览器端的 `waiting` 事件;移动端由宿主播放器的
-  /// isBuffering 信号驱动)。
-  waiting,
-  seeking,
-  seeked,
-  canplay,
-  ratechange,
-  timeupdate,
-  ended,
-  manual,
-}
-
-enum ExplicitUserActionKind { play, pause, seek, ratechange }
-
-typedef ExplicitUserAction = ({ExplicitUserActionKind kind, num at});
 typedef PlaybackVersion = ({num serverTime, num seq});
 
 // ------------------------------------------------------------ 广播侧决策
@@ -554,6 +535,17 @@ class PlayerSyncEngine {
   /// 登记中的本地显式操作(见 pending_local_override.dart)。
   PendingLocalOverride? _pendingLocalOverride;
 
+  // ---- 抑制窗口(sync_guards.dart) ----
+  SuppressedRemotePlayback? _suppressedRemotePlayback;
+  RecentRemotePlayingIntent? _recentRemotePlayingIntent;
+  num _remoteFollowPlayingUntil = 0;
+  String? _remoteFollowPlayingUrl;
+  num _pauseHoldUntil = 0;
+  ProgrammaticPlaybackSignature? _programmaticApplySignature;
+
+  /// 最近一次本地显式播放/暂停动作(带播放态,区别于 lastExplicitUserAction)。
+  ExplicitPlaybackAction? lastExplicitPlaybackAction;
+
   /// 去抖中、尚未施加的远端暂停(见 [remotePauseDebounceMs])。
   PlaybackState? _deferredRemotePause;
   void Function()? _cancelDeferredRemotePause;
@@ -594,6 +586,10 @@ class PlayerSyncEngine {
 
   /// 连播条件已满足但标题尚未就绪,等 [onTitleResolved] 补发分享。
   bool _pendingAutoShareOnTitle = false;
+
+  /// 本地播放器当前是否暂停(桥接层随状态回调写入)。
+  bool _isLocalPaused = true;
+  set isLocalPaused(bool value) => _isLocalPaused = value;
 
   /// 桥接层随位置回调持续写入的本地播放快照(施加时的对齐基准)。
   double? lastKnownPositionSeconds;
@@ -658,6 +654,12 @@ class PlayerSyncEngine {
     _clearDeferredRemotePause();
     _cancelSoftApply('reset');
     _pendingLocalOverride = null;
+    _suppressedRemotePlayback = null;
+    _recentRemotePlayingIntent = null;
+    _remoteFollowPlayingUntil = 0;
+    _remoteFollowPlayingUrl = null;
+    _pauseHoldUntil = 0;
+    _programmaticApplySignature = null;
     // 加载的视频与房间共享视频指向同一目标时,采纳房间身份
     // (URL/videoId 逐字对齐),施加/广播/导航判定即与其他端一致。
     final shared = session.roomState?.sharedVideo;
@@ -704,6 +706,12 @@ class PlayerSyncEngine {
     _clearDeferredRemotePause();
     _cancelSoftApply('reset');
     _pendingLocalOverride = null;
+    _suppressedRemotePlayback = null;
+    _recentRemotePlayingIntent = null;
+    _remoteFollowPlayingUntil = 0;
+    _remoteFollowPlayingUrl = null;
+    _pauseHoldUntil = 0;
+    _programmaticApplySignature = null;
     // 连播是同一播放器实例内换源;播放器销毁说明用户离开了视频页,
     // 之后打开的任何视频都是手动选片,不得自动分享
     _clearSharedVideoNaturalEnd();
@@ -749,6 +757,10 @@ class PlayerSyncEngine {
           ? PlaybackPlayState.playing
           : PlaybackPlayState.paused;
       intendedPlayState = _lastLocalIntentPlayState;
+      lastExplicitPlaybackAction = (
+        playState: _lastLocalIntentPlayState!,
+        at: now,
+      );
       // 用户在非共享视频上明确点播:授权该 URL 本地播放
       if (kind == ExplicitUserActionKind.play) {
         final sharedUrl = _normalizedSharedUrl();
@@ -774,7 +786,7 @@ class PlayerSyncEngine {
     } else if (snapshot.playState == PlaybackPlayState.paused) {
       _cancelSoftApply('local-paused');
     }
-    if (_shouldSuppressAsEcho(eventSource, snapshot.playState)) {
+    if (_shouldSuppressAsEcho(eventSource, snapshot)) {
       return;
     }
     _broadcastPlayback(eventSource, snapshot);
@@ -914,25 +926,31 @@ class PlayerSyncEngine {
     return true;
   }
 
+  /// 施加动作引起的本地回流判定。窗口内、与施加签名四维吻合(URL、
+  /// 播放态、倍速、位置按事件源分档阈值)才算回声。
   bool _shouldSuppressAsEcho(
     LocalPlaybackEventSource eventSource,
-    PlaybackPlayState playState,
+    LocalPlaybackSnapshot snapshot,
   ) {
-    if (!isInProgrammaticApplyWindow) {
-      return false;
+    final url = currentVideo?.normalizedUrl;
+    final decision = shouldSuppressProgrammaticEvent(
+      programmaticApplyUntil: _programmaticApplyUntil,
+      programmaticApplySignature: _programmaticApplySignature,
+      normalizedCurrentUrl: url,
+      playState: snapshot.playState,
+      currentTime: snapshot.positionSeconds,
+      playbackRate: snapshot.playbackRate,
+      eventSource: eventSource,
+      lastExplicitUserAction: lastExplicitUserAction,
+      now: _nowMs(),
+    );
+    if (decision.clearWindow) {
+      _programmaticApplySignature = null;
     }
-    // 施加引起的缓冲不上报:此时位置还停在施加前的旧值,广播出去会让
-    // 服务端按旧位置把房间打成 stop-like(authorityKind: "pause")
-    if (eventSource == LocalPlaybackEventSource.waiting) {
-      _log('Suppressed buffering echo while applying remote playback');
-      return true;
+    if (decision.shouldSuppress) {
+      _log('Suppressed programmatic echo $eventSource');
     }
-    // 程序化施加窗口内、与施加目标一致的状态回流是回声
-    if (_programmaticApplyPlayState == playState) {
-      _log('Suppressed echo $eventSource playState=${playState.wire}');
-      return true;
-    }
-    return false;
+    return decision.shouldSuppress;
   }
 
   // ------------------------------------------------------------ 广播
@@ -962,6 +980,87 @@ class PlayerSyncEngine {
       return;
     }
 
+    final normalizedCurrent = video.normalizedUrl;
+    // 先按上游顺序算出要广播的播放态:seek 途中的瞬时停顿改报 playing,
+    // 后面所有守卫都基于这个值判定(sync-controller.ts:997 早于 1187)
+    final playState = broadcastPlayStateForSeek(
+      eventSource: eventSource,
+      playState: snapshot.playState,
+      intendedPlayState: intendedPlayState,
+      lastExplicitUserAction: lastExplicitUserAction,
+      now: now,
+    );
+
+    // 跟随远端播放后的回流广播是噪音(对端本来就是发起者)
+    final followup = shouldSuppressRemoteFollowupBroadcast(
+      remoteFollowPlayingUntil: _remoteFollowPlayingUntil,
+      remoteFollowPlayingUrl: _remoteFollowPlayingUrl,
+      normalizedCurrentUrl: normalizedCurrent,
+      playState: playState,
+      eventSource: eventSource,
+      lastExplicitUserAction: lastExplicitUserAction,
+      now: now,
+    );
+    _remoteFollowPlayingUntil = followup.nextUntil;
+    _remoteFollowPlayingUrl = followup.nextUrl;
+    if (followup.shouldSuppress) {
+      _log('Skip broadcast: following remote playback');
+      return;
+    }
+
+    // 远端停止意图仍在生效时,本地冒出来的播放不得上报:那多半是
+    // 播放器自己恢复的(施加暂停前排队的 play、缓冲结束回弹),不是用户
+    // 要播。用户真按了播放会记在 lastExplicitPlaybackAction 上,放行。
+    if (playState == PlaybackPlayState.playing &&
+        hasRecentRemoteStopIntent(
+          now: now,
+          pauseHoldUntil: _pauseHoldUntil,
+          normalizedCurrentUrl: normalizedCurrent,
+          activeSharedUrl: _normalizedSharedUrl(),
+          intendedPlayState: intendedPlayState,
+          suppressedRemotePlayback: _suppressedRemotePlayback,
+        )) {
+      final action = lastExplicitPlaybackAction;
+      final userWantsPlay =
+          action != null &&
+          action.playState == PlaybackPlayState.playing &&
+          now - action.at < userGestureGraceMs;
+      if (!userWantsPlay) {
+        _log('Skip broadcast: remote stop intent still holds');
+        return;
+      }
+    }
+
+    // 刚施加的远端状态引起的本地回流
+    final echo = shouldSuppressLocalEcho(
+      suppressedRemotePlayback: _suppressedRemotePlayback,
+      normalizedCurrentUrl: normalizedCurrent,
+      playState: playState,
+      currentTime: snapshot.positionSeconds,
+      playbackRate: snapshot.playbackRate,
+      now: now,
+    );
+    _suppressedRemotePlayback = echo.next;
+    if (echo.shouldSuppress) {
+      _log('Skip broadcast: echo of applied remote playback');
+      return;
+    }
+
+    // 施加远端播放后播放器常先冒一下暂停,那个瞬时状态不能播回去
+    final transition = shouldSuppressRemotePlayTransition(
+      recentRemotePlayingIntent: _recentRemotePlayingIntent,
+      normalizedCurrentUrl: normalizedCurrent,
+      playState: playState,
+      currentTime: snapshot.positionSeconds,
+      lastExplicitPlaybackAction: lastExplicitPlaybackAction,
+      now: now,
+    );
+    _recentRemotePlayingIntent = transition.next;
+    if (transition.shouldSuppress) {
+      _log('Skip broadcast: transient pause after remote play');
+      return;
+    }
+
     final sharedUrl = _normalizedSharedUrl();
     if (shouldPauseForNonSharedBroadcast(
       activeRoomCode: session.roomCode,
@@ -982,13 +1081,6 @@ class PlayerSyncEngine {
       return;
     }
 
-    final playState = broadcastPlayStateForSeek(
-      eventSource: eventSource,
-      playState: snapshot.playState,
-      intendedPlayState: intendedPlayState,
-      lastExplicitUserAction: lastExplicitUserAction,
-      now: now,
-    );
     final syncIntent = derivePlaybackSyncIntent(
       eventSource: eventSource,
       lastExplicitUserAction: lastExplicitUserAction,
@@ -1140,14 +1232,37 @@ class PlayerSyncEngine {
     }
 
     if (decision is! ApplyPlayback) {
+      // 首个权威状态还没到、本地却在播:先停住。跟随导航是强制起播的,
+      // 不停会一路播下去,hydration 一结束广播守卫失效就翻掉房间状态。
+      if (shouldForcePauseWhileWaitingForInitialRoomState(
+        activeRoomCode: session.roomCode,
+        pendingRoomStateHydration: pendingRoomStateHydration,
+        isLocalPaused: _isLocalPaused,
+      )) {
+        _log('Force-pausing while waiting for the initial room state');
+        lastForcedPauseAt = _nowMs();
+        await _applyProgrammatically(
+          PlaybackPlayState.paused,
+          () => port.pause(),
+        );
+      }
       return;
     }
     final playback = decision.playback;
     _lastAppliedVersion = (serverTime: playback.serverTime, seq: playback.seq);
     if (decision.isSelfPlayback) {
-      // 自己的状态回流:只推进版本号,不施加
+      // 自己的状态回流通常不必施加,但本地实际状态可能已经和它对不上
+      // (该停没停、位置偏了…),那种情况必须施加,否则会静默失配
       pendingRoomStateHydration = false;
-      return;
+      if (!shouldApplySelfPlayback(
+        isLocalPaused: _isLocalPaused,
+        localCurrentTime: lastKnownPositionSeconds ?? 0,
+        localPlaybackRate: lastKnownRate ?? 1,
+        playback: playback,
+      )) {
+        return;
+      }
+      _log('Applying own playback: local state drifted from it');
     }
     final overrideDecision = decidePendingLocalOverride(
       pending: _pendingLocalOverride,
@@ -1287,6 +1402,26 @@ class PlayerSyncEngine {
     };
 
     intendedPlayState = playback.playState;
+    final normalizedUrl = normalizeBilibiliUrl(playback.url);
+    final remembered = rememberRemotePlaybackForSuppression(
+      playback: playback,
+      normalizedUrl: normalizedUrl,
+      now: _nowMs(),
+    );
+    _suppressedRemotePlayback = remembered.suppressed;
+    _recentRemotePlayingIntent = remembered.playingIntent;
+    if (playback.playState == PlaybackPlayState.playing) {
+      // 跟随远端播放:随后本地回流的 playing/canplay 是噪音,不必播回去
+      _remoteFollowPlayingUntil = _nowMs() + remotePlayTransitionGuardMs;
+      _remoteFollowPlayingUrl = normalizedUrl;
+    } else {
+      _remoteFollowPlayingUntil = 0;
+      _remoteFollowPlayingUrl = null;
+      // 远端停止意图:生效期内本地不得自作主张恢复播放
+      _pauseHoldUntil =
+          _nowMs() +
+          (hydrating ? initialRoomStatePauseHoldMs : pauseHoldMs);
+    }
     final willSeek =
         reconcile.mode == PlaybackReconcileMode.softApply ||
         reconcile.mode == PlaybackReconcileMode.hardSeek;
@@ -1317,7 +1452,15 @@ class PlayerSyncEngine {
       }
     }, seekTarget: willSeek
         ? (softApplied?.currentTime ?? playback.currentTime)
-        : null);
+        : null,
+        signature: normalizedUrl == null
+            ? null
+            : (
+                url: normalizedUrl,
+                playState: playback.playState,
+                currentTime: softApplied?.currentTime ?? playback.currentTime,
+                playbackRate: catchUpRate,
+              ));
 
     // 中间两档要留一个会话:倍速被调高过,必须有东西负责把它调回去
     switch (reconcile.mode) {
@@ -1531,8 +1674,12 @@ class PlayerSyncEngine {
     PlaybackPlayState targetPlayState,
     Future<void> Function() apply, {
     double? seekTarget,
+    ProgrammaticPlaybackSignature? signature,
   }) async {
     _programmaticApplyPlayState = targetPlayState;
+    if (signature != null) {
+      _programmaticApplySignature = signature;
+    }
     _programmaticApplyUntil = _nowMs() + programmaticApplyWindowMs;
     // 施加期间不做到位判定:目标先记下,窗口在 apply 返回后才开始计时
     _clearPendingProgrammaticSeek();
@@ -1599,6 +1746,12 @@ class PlayerSyncEngine {
     _clearDeferredRemotePause();
     _cancelSoftApply('reset');
     _pendingLocalOverride = null;
+    _suppressedRemotePlayback = null;
+    _recentRemotePlayingIntent = null;
+    _remoteFollowPlayingUntil = 0;
+    _remoteFollowPlayingUrl = null;
+    _pauseHoldUntil = 0;
+    _programmaticApplySignature = null;
     explicitNonSharedPlaybackUrl = null;
     _lastAppliedVersion = null;
     _lastLocalPlaybackVersion = null;

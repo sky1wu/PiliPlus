@@ -307,7 +307,11 @@ class SyncPlayService extends ChangeNotifier {
       return;
     }
     final seconds = position.inMilliseconds / 1000;
-    engine.lastKnownPositionSeconds = seconds;
+    engine
+      ..lastKnownPositionSeconds = seconds
+      ..isLocalPaused = !(PlPlayerController.instance?.playerStatus.value
+              .isPlaying ??
+          false);
     engine.lastKnownRate = PlPlayerController.instance?.playbackSpeed;
     engine.onLocalPosition(_snapshot(positionSeconds: seconds));
   }
@@ -316,6 +320,8 @@ class SyncPlayService extends ChangeNotifier {
     if (!inRoom) {
       return;
     }
+    // 守卫要知道本地是否真的停着(hydration 强制暂停、自身状态回流判定)
+    engine.isLocalPaused = !status.isPlaying;
     switch (status) {
       case PlayerStatus.playing:
         engine.onLocalPlayStateChanged(
