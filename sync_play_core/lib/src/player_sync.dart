@@ -14,9 +14,9 @@
 /// - soft-apply 追平期间本地开始缓冲即放弃追平(浏览器端没有这一档:
 ///   那边 seek 近乎瞬时,不存在"追平时播不动"的情况);
 /// - 远端处于 buffering 时不对齐进度(浏览器端会 seek 过去):缓冲中的
-///   currentTime 是冻结值,移动端照做会让两端互相拽回、锁死在同一小段。
-///   例外是 seek 引起的缓冲——那个位置是刚跳到的新目标,必须对齐
-///   (见 [_applyRemotePlayback])。
+///   currentTime 是冻结值,移动端照做会让两端互相拽回、锁死在同一小段
+///   (见 [_applyRemotePlayback])。seek 引起的缓冲不会走到这里——广播侧
+///   已按扩展端语义改报 playing(见 [broadcastPlayStateForSeek])。
 library;
 
 import 'dart:async';
@@ -163,6 +163,41 @@ bool deriveUserInitiatedPause({
   return true;
 }
 
+/// sync-controller.ts: getBroadcastPlayState 的 seek 覆盖分支。
+///
+/// 刚发生过显式 seek 且意图仍是播放时,seek/暂停/缓冲类事件一律改报
+/// `playing`。seek 途中播放器必然短暂 readyState 不足、甚至先 pause 再
+/// resume,把那些瞬时状态如实播出去会让对端以为发起端停了:轻则跟着停,
+/// 重则拿那个冻结位置反过来对齐,两端互相拽。上游用这一条把"seek 引起的
+/// 停顿"整个挡在广播之前,所以协议上根本不存在 buffering + explicit-seek
+/// 的组合(服务端 derivePlaybackAuthorityKind 里 buffering 抢在
+/// explicit-seek 之前判 pause,也因此从未被触发)。
+PlaybackPlayState broadcastPlayStateForSeek({
+  required LocalPlaybackEventSource eventSource,
+  required PlaybackPlayState playState,
+  required PlaybackPlayState? intendedPlayState,
+  required ExplicitUserAction? lastExplicitUserAction,
+  required num now,
+  int gestureGraceMs = userGestureGraceMs,
+}) {
+  const seekStallSources = {
+    LocalPlaybackEventSource.seeking,
+    LocalPlaybackEventSource.seeked,
+    LocalPlaybackEventSource.pause,
+    LocalPlaybackEventSource.waiting,
+  };
+  final hasRecentExplicitSeek =
+      lastExplicitUserAction != null &&
+      lastExplicitUserAction.kind == ExplicitUserActionKind.seek &&
+      now - lastExplicitUserAction.at < gestureGraceMs;
+  if (hasRecentExplicitSeek &&
+      intendedPlayState == PlaybackPlayState.playing &&
+      seekStallSources.contains(eventSource)) {
+    return PlaybackPlayState.playing;
+  }
+  return playState;
+}
+
 /// playback-broadcast.ts: derivePlaybackSyncIntent
 PlaybackSyncIntent? derivePlaybackSyncIntent({
   required LocalPlaybackEventSource eventSource,
@@ -189,11 +224,6 @@ PlaybackSyncIntent? derivePlaybackSyncIntent({
     LocalPlaybackEventSource.playing,
     LocalPlaybackEventSource.canplay,
     LocalPlaybackEventSource.timeupdate,
-    // 移动端专属:seek 后几十毫秒内就会进入缓冲,那条 buffering 带的
-    // currentTime 正是 seek 的新目标,必须让它携带 explicit-seek 意图 ——
-    // 否则对端按"缓冲位置不可信"整条忽略,白等一轮才开始跳。
-    // 浏览器端不需要:那边 seek 近乎瞬时,不会持续 waiting。
-    LocalPlaybackEventSource.waiting,
   };
   final seekGraceMs = gestureGraceMs > explicitSeekBroadcastGraceMs
       ? gestureGraceMs
@@ -502,6 +532,10 @@ class PlayerSyncEngine {
   bool pendingRoomStateHydration = false;
 
   ExplicitUserAction? lastExplicitUserAction;
+
+  /// 当前"应该处于"的播放状态(runtime-state.ts: intendedPlayState):
+  /// 本地手势与远端施加都会写入。用于把 seek 途中的瞬时停顿改报 playing。
+  PlaybackPlayState? intendedPlayState;
   num lastUserGestureAt = 0;
   num lastForcedPauseAt = 0;
   num _programmaticApplyUntil = 0;
@@ -708,6 +742,7 @@ class PlayerSyncEngine {
       _lastLocalIntentPlayState = kind == ExplicitUserActionKind.play
           ? PlaybackPlayState.playing
           : PlaybackPlayState.paused;
+      intendedPlayState = _lastLocalIntentPlayState;
       // 用户在非共享视频上明确点播:授权该 URL 本地播放
       if (kind == ExplicitUserActionKind.play) {
         final sharedUrl = _normalizedSharedUrl();
@@ -941,6 +976,13 @@ class PlayerSyncEngine {
       return;
     }
 
+    final playState = broadcastPlayStateForSeek(
+      eventSource: eventSource,
+      playState: snapshot.playState,
+      intendedPlayState: intendedPlayState,
+      lastExplicitUserAction: lastExplicitUserAction,
+      now: now,
+    );
     final syncIntent = derivePlaybackSyncIntent(
       eventSource: eventSource,
       lastExplicitUserAction: lastExplicitUserAction,
@@ -949,7 +991,7 @@ class PlayerSyncEngine {
     );
     final userInitiated = deriveUserInitiatedPause(
       eventSource: eventSource,
-      playState: snapshot.playState,
+      playState: playState,
       lastExplicitUserAction: lastExplicitUserAction,
       lastForcedPauseAt: lastForcedPauseAt,
       programmaticApplyUntil: _programmaticApplyUntil,
@@ -961,7 +1003,7 @@ class PlayerSyncEngine {
     final payload = PlaybackState(
       url: video.normalizedUrl,
       currentTime: snapshot.positionSeconds,
-      playState: snapshot.playState,
+      playState: playState,
       syncIntent: syncIntent,
       userInitiated: userInitiated ? true : null,
       naturalEnd: naturalEnd ? true : null,
@@ -1141,22 +1183,6 @@ class PlayerSyncEngine {
     bool hydrating = false,
   }) async {
     if (playback.playState == PlaybackPlayState.buffering) {
-      // seek 引起的缓冲:currentTime 不是冻结的旧值,而是刚跳到的新目标,
-      // 必须立刻对齐(只对位置,不动播放状态)。等对端缓冲完那条 playing
-      // 再跳的话,对端要多等一整轮 RTT 加一次完整缓冲。
-      if (!hydrating &&
-          shouldTreatAsExplicitSeek(
-            syncIntent: playback.syncIntent,
-            playState: PlaybackPlayState.playing,
-          )) {
-        _log('Aligning to seek target while remote buffers');
-        await _applyProgrammatically(
-          _programmaticApplyPlayState ?? PlaybackPlayState.playing,
-          () => port.seekTo(playback.currentTime),
-          seekTarget: playback.currentTime,
-        );
-        return;
-      }
       if (hydrating) {
         // 首个权威状态就是 buffering:房间还没真正开始播,本地必须停住。
         // 跟随导航是强制 autoPlay 的,这里不停就会一路播下去,而且
@@ -1226,6 +1252,7 @@ class PlayerSyncEngine {
       _ => playback.playbackRate,
     };
 
+    intendedPlayState = playback.playState;
     final willSeek =
         reconcile.mode == PlaybackReconcileMode.softApply ||
         reconcile.mode == PlaybackReconcileMode.hardSeek;

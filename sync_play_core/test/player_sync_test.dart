@@ -588,40 +588,55 @@ void main() {
       expect(harness.session.playbackUpdates.single.currentTime, 200);
     });
 
-    test('aligns to a seek target even while the peer buffers', () async {
+    test('a stall right after a user seek is broadcast as playing', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();
-      harness.engine.lastKnownPositionSeconds = 30;
+      harness.now += programmaticApplyWindowMs + 100;
+      harness.engine
+        ..intendedPlayState = PlaybackPlayState.playing
+        ..onUserGesture(ExplicitUserActionKind.seek);
+      harness.session.playbackUpdates.clear();
 
-      // 发起端 seek 后几十毫秒就进入缓冲,那条 buffering 带的是新目标。
-      // 忽略它的话对端要多等一整轮才开始跳。
-      final state = roomState(
-        playback: playback(
-          currentTime: 198.4,
+      // seek 途中必然短暂缓冲。如实上报会让对端以为发起端停了 ——
+      // 上游在广播前就把这类瞬时停顿改报 playing
+      // (sync-controller.ts: getBroadcastPlayState)
+      harness.engine.onLocalPlayStateChanged(
+        LocalPlaybackEventSource.waiting,
+        harness.snapshot(
+          position: 198.4,
           playState: PlaybackPlayState.buffering,
-          syncIntent: PlaybackSyncIntent.explicitSeek,
-          seq: 5,
         ),
       );
-      harness.session.roomState = state;
-      await harness.engine.applyRoomState(state);
 
-      expect(harness.port.calls, ['seekTo:198.4']);
-      // 只对齐位置,不动播放状态
-      expect(harness.port.calls, isNot(contains('pause')));
-      expect(harness.port.calls, isNot(contains('play')));
+      expect(harness.session.playbackUpdates, hasLength(1));
+      final update = harness.session.playbackUpdates.single;
+      expect(update.playState, PlaybackPlayState.playing);
+      expect(update.currentTime, 198.4);
     });
 
-    test('a buffering broadcast carries a recent seek intent', () {
-      expect(
-        derivePlaybackSyncIntent(
-          eventSource: LocalPlaybackEventSource.waiting,
-          lastExplicitUserAction: (kind: ExplicitUserActionKind.seek, at: 1000),
-          lastForcedPauseAt: 0,
-          now: 1100,
+    test('the seek override needs both a recent seek and a play intent', () {
+      PlaybackPlayState stateFor({
+        PlaybackPlayState? intended = PlaybackPlayState.playing,
+        num seekAt = 1000,
+      }) => broadcastPlayStateForSeek(
+        eventSource: LocalPlaybackEventSource.waiting,
+        playState: PlaybackPlayState.buffering,
+        intendedPlayState: intended,
+        lastExplicitUserAction: (
+          kind: ExplicitUserActionKind.seek,
+          at: seekAt,
         ),
-        PlaybackSyncIntent.explicitSeek,
+        now: 1100,
       );
+
+      expect(stateFor(), PlaybackPlayState.playing);
+      // 意图是暂停时不覆盖:那本来就该停着
+      expect(
+        stateFor(intended: PlaybackPlayState.paused),
+        PlaybackPlayState.buffering,
+      );
+      // 手势过期后不覆盖:这时的缓冲是真的卡住了
+      expect(stateFor(seekAt: -1000), PlaybackPlayState.buffering);
     });
 
     test('remote buffering touches nothing at all', () async {
