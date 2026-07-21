@@ -563,6 +563,42 @@ void main() {
       expect(harness.session.playbackUpdates, isEmpty);
     });
 
+    test('aligns to a seek target even while the peer buffers', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 发起端 seek 后几十毫秒就进入缓冲,那条 buffering 带的是新目标。
+      // 忽略它的话对端要多等一整轮才开始跳。
+      final state = roomState(
+        playback: playback(
+          currentTime: 198.4,
+          playState: PlaybackPlayState.buffering,
+          syncIntent: PlaybackSyncIntent.explicitSeek,
+          seq: 5,
+        ),
+      );
+      harness.session.roomState = state;
+      await harness.engine.applyRoomState(state);
+
+      expect(harness.port.calls, ['seekTo:198.4']);
+      // 只对齐位置,不动播放状态
+      expect(harness.port.calls, isNot(contains('pause')));
+      expect(harness.port.calls, isNot(contains('play')));
+    });
+
+    test('a buffering broadcast carries a recent seek intent', () {
+      expect(
+        derivePlaybackSyncIntent(
+          eventSource: LocalPlaybackEventSource.waiting,
+          lastExplicitUserAction: (kind: ExplicitUserActionKind.seek, at: 1000),
+          lastForcedPauseAt: 0,
+          now: 1100,
+        ),
+        PlaybackSyncIntent.explicitSeek,
+      );
+    });
+
     test('remote buffering touches nothing at all', () async {
       final harness = EngineHarness();
       await harness.loadSharedVideoAndHydrate();

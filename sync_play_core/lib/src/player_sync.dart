@@ -13,9 +13,10 @@
 ///   [programmaticSeekSettleTimeoutMs]),不是浏览器端够用的固定 700ms;
 /// - soft-apply 追平期间本地开始缓冲即放弃追平(浏览器端没有这一档:
 ///   那边 seek 近乎瞬时,不存在"追平时播不动"的情况);
-/// - 远端处于 buffering 时完全不对齐进度(浏览器端会 seek 过去):
-///   缓冲中的 currentTime 是冻结值,移动端照做会让两端互相拽回、
-///   锁死在同一小段(见 [_applyRemotePlayback])。
+/// - 远端处于 buffering 时不对齐进度(浏览器端会 seek 过去):缓冲中的
+///   currentTime 是冻结值,移动端照做会让两端互相拽回、锁死在同一小段。
+///   例外是 seek 引起的缓冲——那个位置是刚跳到的新目标,必须对齐
+///   (见 [_applyRemotePlayback])。
 library;
 
 import 'dart:async';
@@ -188,6 +189,11 @@ PlaybackSyncIntent? derivePlaybackSyncIntent({
     LocalPlaybackEventSource.playing,
     LocalPlaybackEventSource.canplay,
     LocalPlaybackEventSource.timeupdate,
+    // 移动端专属:seek 后几十毫秒内就会进入缓冲,那条 buffering 带的
+    // currentTime 正是 seek 的新目标,必须让它携带 explicit-seek 意图 ——
+    // 否则对端按"缓冲位置不可信"整条忽略,白等一轮才开始跳。
+    // 浏览器端不需要:那边 seek 近乎瞬时,不会持续 waiting。
+    LocalPlaybackEventSource.waiting,
   };
   final seekGraceMs = gestureGraceMs > explicitSeekBroadcastGraceMs
       ? gestureGraceMs
@@ -1122,6 +1128,22 @@ class PlayerSyncEngine {
     bool hydrating = false,
   }) async {
     if (playback.playState == PlaybackPlayState.buffering) {
+      // seek 引起的缓冲:currentTime 不是冻结的旧值,而是刚跳到的新目标,
+      // 必须立刻对齐(只对位置,不动播放状态)。等对端缓冲完那条 playing
+      // 再跳的话,对端要多等一整轮 RTT 加一次完整缓冲。
+      if (!hydrating &&
+          shouldTreatAsExplicitSeek(
+            syncIntent: playback.syncIntent,
+            playState: PlaybackPlayState.playing,
+          )) {
+        _log('Aligning to seek target while remote buffers');
+        await _applyProgrammatically(
+          _programmaticApplyPlayState ?? PlaybackPlayState.playing,
+          () => port.seekTo(playback.currentTime),
+          seekTarget: playback.currentTime,
+        );
+        return;
+      }
       if (hydrating) {
         // 首个权威状态就是 buffering:房间还没真正开始播,本地必须停住。
         // 跟随导航是强制 autoPlay 的,这里不停就会一路播下去,而且
