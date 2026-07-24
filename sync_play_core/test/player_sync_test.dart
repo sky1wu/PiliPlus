@@ -220,23 +220,88 @@ void main() {
         PlaybackReconcileMode.hardSeek,
       );
     });
+
+    test('playing ignore threshold has hysteresis while catching up', () {
+      // 0.44s 落在原本永远不会启动纠正的区间……
+      expect(
+        decidePlaybackReconcileMode(
+          localCurrentTime: 27.36,
+          targetTime: 27.8,
+          playState: PlaybackPlayState.playing,
+          hasActiveCatchUp: false,
+        ).mode,
+        PlaybackReconcileMode.ignore,
+      );
+      // ……但一旦追平在跑,停在这里正是残余漂移被逐次垫高的根源。
+      expect(
+        decidePlaybackReconcileMode(
+          localCurrentTime: 27.36,
+          targetTime: 27.8,
+          playState: PlaybackPlayState.playing,
+          hasActiveCatchUp: true,
+        ).mode,
+        PlaybackReconcileMode.rateOnly,
+      );
+    });
+
+    test('catch-up still terminates once drift is genuinely closed', () {
+      expect(
+        decidePlaybackReconcileMode(
+          localCurrentTime: 29.78,
+          targetTime: 29.8,
+          playState: PlaybackPlayState.playing,
+          hasActiveCatchUp: true,
+        ).mode,
+        PlaybackReconcileMode.ignore,
+      );
+    });
   });
 
   group('derivePlaybackSyncIntent', () {
-    test('recent user seek carried by timeupdate within 2.5s grace', () {
-      final intent = derivePlaybackSyncIntent(
-        eventSource: LocalPlaybackEventSource.timeupdate,
-        lastExplicitUserAction: (kind: ExplicitUserActionKind.seek, at: 1000),
-        lastForcedPauseAt: 0,
-        now: 3400,
-      );
-      expect(intent, PlaybackSyncIntent.explicitSeek);
+    test("the seek's own events carry explicit-seek", () {
+      for (final eventSource in [
+        LocalPlaybackEventSource.seeking,
+        LocalPlaybackEventSource.seeked,
+        LocalPlaybackEventSource.play,
+        LocalPlaybackEventSource.playing,
+        LocalPlaybackEventSource.canplay,
+      ]) {
+        expect(
+          derivePlaybackSyncIntent(
+            eventSource: eventSource,
+            lastExplicitUserAction: (
+              kind: ExplicitUserActionKind.seek,
+              at: 20000,
+            ),
+            lastForcedPauseAt: 0,
+            now: 20100,
+          ),
+          PlaybackSyncIntent.explicitSeek,
+          reason: '$eventSource should carry the seek intent',
+        );
+      }
+    });
+
+    test('the periodic timeupdate heartbeat never carries explicit-seek', () {
+      // timeupdate 在距上次广播约 2s 后才发,每次 seek 之后必有一条落在
+      // 2.5s 意图窗口内。接收端把 playing + explicit-seek 变成无条件
+      // hard-seek 并撕毁正在进行的追平,于是打上该意图会让所有对端在 seek
+      // 后约 2s 强制跳转,哪怕本已同步。窗口内窗口外都不得携带。
       expect(
         derivePlaybackSyncIntent(
           eventSource: LocalPlaybackEventSource.timeupdate,
-          lastExplicitUserAction: (kind: ExplicitUserActionKind.seek, at: 1000),
+          lastExplicitUserAction: (kind: ExplicitUserActionKind.seek, at: 20000),
           lastForcedPauseAt: 0,
-          now: 3600,
+          now: 22100,
+        ),
+        isNull,
+      );
+      expect(
+        derivePlaybackSyncIntent(
+          eventSource: LocalPlaybackEventSource.timeupdate,
+          lastExplicitUserAction: (kind: ExplicitUserActionKind.seek, at: 20000),
+          lastForcedPauseAt: 0,
+          now: 20100,
         ),
         isNull,
       );
@@ -448,13 +513,14 @@ void main() {
       harness.engine.lastKnownPositionSeconds = 30;
 
       // 0.7s 漂移落在 rateOnly 档:只调速率,绝不能 seek
+      // (0.7*0.30=0.21 触顶到 0.16 → 1.16)
       final state = roomState(
         playback: playback(currentTime: 30.7, seq: 5),
       );
       harness.session.roomState = state;
       await harness.engine.applyRoomState(state);
 
-      expect(harness.port.calls, ['setRate:1.12', 'play']);
+      expect(harness.port.calls, ['setRate:1.16', 'play']);
       expect(harness.port.calls.join(), isNot(contains('seekTo')));
     });
 
@@ -482,13 +548,40 @@ void main() {
       final state = roomState(playback: playback(currentTime: 31.1, seq: 5));
       harness.session.roomState = state;
       await harness.engine.applyRoomState(state);
-      harness.engine.lastKnownRate = 1.12;
+      harness.engine.lastKnownRate = 1.16;
       harness.port.calls.clear();
 
       // 本地追到目标 ±0.2s 内:恢复基准倍速
       harness.engine.onLocalPosition(harness.snapshot(position: 31.0));
       await Future<void>.delayed(Duration.zero);
       expect(harness.port.calls, contains('setRate:1.0'));
+    });
+
+    test('a steadily advancing peer does not cancel a catch-up early', () async {
+      final harness = EngineHarness();
+      await harness.loadSharedVideoAndHydrate();
+      harness.engine.lastKnownPositionSeconds = 30;
+
+      // 0.7s 漂移 → rateOnly 追平,快照目标 30.7、基准 1x
+      final s1 = roomState(playback: playback(currentTime: 30.7, seq: 5));
+      harness.session.roomState = s1;
+      await harness.engine.applyRoomState(s1);
+      expect(harness.port.calls, ['setRate:1.16', 'play']);
+      harness.engine.lastKnownRate = 1.16;
+      harness.port.calls.clear();
+
+      // 3s 后对端稳定 1x 播,发来例行心跳:远端已从 30.7 推进到 33.7。
+      // 拿冻结快照去比会显示成 3s 跳变,旧逻辑报 target-shifted 取消会话
+      // 并把倍速调回 1.0;按已过时长外推后 33.7 正好落位,会话继续。
+      harness.now += 3000;
+      harness.engine.lastKnownPositionSeconds = 33.4;
+      final s2 = roomState(playback: playback(currentTime: 33.7, seq: 6));
+      harness.session.roomState = s2;
+      await harness.engine.applyRoomState(s2);
+
+      // 没有恢复到基准倍速 = 追平未被当成 target-shifted 提前杀掉
+      // (list 的精确元素匹配,避免把追平倍速 setRate:1.09 误判成 1.0)
+      expect(harness.port.calls, isNot(contains('setRate:1.0')));
     });
 
     test('local buffering abandons an active catch-up', () async {
@@ -499,7 +592,7 @@ void main() {
       final state = roomState(playback: playback(currentTime: 30.7, seq: 5));
       harness.session.roomState = state;
       await harness.engine.applyRoomState(state);
-      harness.engine.lastKnownRate = 1.12;
+      harness.engine.lastKnownRate = 1.16;
       harness.port.calls.clear();
 
       // 追平期间开始缓冲:放弃追平并把倍速调回去
@@ -537,7 +630,7 @@ void main() {
       final state = roomState(playback: playback(currentTime: 31.1, seq: 5));
       harness.session.roomState = state;
       await harness.engine.applyRoomState(state);
-      // 播放器上的倍速已不是我们写的 1.12(用户在移动端改了速度,
+      // 播放器上的倍速已不是我们写的 1.16(用户在移动端改了速度,
       // 而该路径目前不经过引擎):恢复会吞掉用户的操作
       harness.engine.lastKnownRate = 2;
       harness.port.calls.clear();

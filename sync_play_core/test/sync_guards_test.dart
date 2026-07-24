@@ -161,6 +161,7 @@ void main() {
       double currentTime = 30,
       ExplicitUserAction? action,
       num now = 500,
+      num programmaticApplyAt = 0,
       ProgrammaticPlaybackSignature? signature = (
         url: _url,
         playState: PlaybackPlayState.playing,
@@ -169,6 +170,7 @@ void main() {
       ),
     }) => shouldSuppressProgrammaticEvent(
       programmaticApplyUntil: 1000,
+      programmaticApplyAt: programmaticApplyAt,
       programmaticApplySignature: signature,
       normalizedCurrentUrl: _url,
       playState: PlaybackPlayState.playing,
@@ -217,6 +219,53 @@ void main() {
       );
       expect(decision.shouldSuppress, isFalse);
       expect(decision.clearWindow, isTrue);
+    });
+
+    test('a gesture recorded before the window opened is not a bypass', () {
+      // 用户在窗口开始前(200 < 300)拖过进度条,施加自身的回声不得借这条
+      // 陈旧记录放行——按签名匹配照常当回声抑制。
+      expect(
+        call(
+          eventSource: LocalPlaybackEventSource.pause,
+          action: (kind: ExplicitUserActionKind.pause, at: 200),
+          programmaticApplyAt: 300,
+        ).shouldSuppress,
+        isTrue,
+      );
+      // 同一动作若发生在窗口开始之后(200 >= 100),仍是真实接管,放行。
+      expect(
+        call(
+          eventSource: LocalPlaybackEventSource.pause,
+          action: (kind: ExplicitUserActionKind.pause, at: 200),
+          programmaticApplyAt: 100,
+        ).shouldSuppress,
+        isFalse,
+      );
+    });
+
+    test('a paused event is never an echo of a playing signature', () {
+      // 追平中(房间在播 ⟹ 签名 playState=playing)用户暂停:即便这次 pause
+      // 手势早于 soft-apply 取消回写速率所开的窗口、放行分支被拒,状态不兼容
+      // 也会短路成"不抑制"。这正是浏览器端 #195 需要 ratechange 作用域、而
+      // 本移植不需要的原因(seek 更是根本不经过本守卫)。
+      final decision = shouldSuppressProgrammaticEvent(
+        programmaticApplyUntil: 1000,
+        programmaticApplyAt: 500,
+        programmaticApplySignature: (
+          url: _url,
+          playState: PlaybackPlayState.playing,
+          currentTime: 30.0,
+          playbackRate: 1.0,
+        ),
+        normalizedCurrentUrl: _url,
+        playState: PlaybackPlayState.paused,
+        currentTime: 30,
+        playbackRate: 1,
+        eventSource: LocalPlaybackEventSource.pause,
+        lastExplicitUserAction: (kind: ExplicitUserActionKind.pause, at: 200),
+        now: 600,
+      );
+      expect(decision.shouldSuppress, isFalse);
     });
   });
 

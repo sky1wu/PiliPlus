@@ -203,13 +203,20 @@ PlaybackSyncIntent? derivePlaybackSyncIntent({
     return PlaybackSyncIntent.explicitRatechange;
   }
 
+  // timeupdate 刻意不在其中。它是周期心跳而非 seek 的组成部分:在播时每距
+  // 上次广播超过 2s 就发一条,恰好落在每次用户 seek 之后的
+  // explicitSeekBroadcastGraceMs(2500ms)窗口内。接收端把 playing +
+  // explicit-seek 转成无条件 hard-seek(绕过全部漂移阈值),又经
+  // apply-hard-seek 撕毁正在进行的追平会话并武装 cooldown——于是每次 seek 后
+  // 约两秒,所有对端被强制跳转一次并进入校正黑屏期,哪怕它们本已同步到 0.02s
+  // 以内,与 #188 建立的收敛机制直接冲突。跳转本身不会丢:下面这些事件源
+  // 就是 seek 本身,足够大的跳转仍会越过常规的 playing-hard-drift 阈值。
   const seekCarrierSources = {
     LocalPlaybackEventSource.seeking,
     LocalPlaybackEventSource.seeked,
     LocalPlaybackEventSource.play,
     LocalPlaybackEventSource.playing,
     LocalPlaybackEventSource.canplay,
-    LocalPlaybackEventSource.timeupdate,
   };
   final seekGraceMs = gestureGraceMs > explicitSeekBroadcastGraceMs
       ? gestureGraceMs
@@ -349,6 +356,15 @@ enum PlaybackReconcileMode { ignore, rateOnly, softApply, hardSeek }
 /// playback-reconcile.ts 阈值常量
 const double pausedHardSeekThresholdSeconds = 0.15;
 const double playingIgnoreThresholdSeconds = 0.45;
+
+/// 追平进行中的 ignore 门限(playback-reconcile.ts:
+/// PLAYING_CATCH_UP_IGNORE_THRESHOLD_SECONDS)。
+///
+/// [playingIgnoreThresholdSeconds] 是纠正*启动*的门限;拿同一个值判定何时
+/// *停止*会让追平没有回差:漂移一跌回 0.45 以下就立刻收手,于是每次纠正都
+/// 停在阈值附近而非归零,缓冲卡顿逐次把残留往上垫,最终稳定偏离房间约半秒。
+/// 一旦开始纠正,就把门限降到 0.05,追平到零才停。
+const double playingCatchUpIgnoreThresholdSeconds = 0.05;
 const double playingRateOnlyThresholdSeconds = 0.9;
 const double playingSoftApplyThresholdSeconds = 1.2;
 
@@ -364,6 +380,9 @@ PlaybackReconcileDecision decidePlaybackReconcileMode({
   required PlaybackPlayState playState,
   bool isExplicitSeek = false,
   double playbackRate = 1,
+  /// 该视频上是否已有追平会话在跑。为 true 时降低 ignore 门限,让纠正收敛
+  /// 到零,而不是一跌回启动它的(大得多的)门限就停手。
+  bool hasActiveCatchUp = false,
 }) {
   final delta = (targetTime - localCurrentTime).abs();
 
@@ -382,8 +401,10 @@ PlaybackReconcileDecision decidePlaybackReconcileMode({
 
   final rateMultiplier = playbackRate > 1 ? playbackRate : 1;
   final extraRate = rateMultiplier - 1;
-  final ignoreThreshold =
-      playingIgnoreThresholdSeconds * (1 + extraRate * 0.35);
+  final baseIgnoreThreshold = hasActiveCatchUp
+      ? playingCatchUpIgnoreThresholdSeconds
+      : playingIgnoreThresholdSeconds;
+  final ignoreThreshold = baseIgnoreThreshold * (1 + extraRate * 0.35);
   final rateOnlyThreshold =
       playingRateOnlyThresholdSeconds * (1 + extraRate * 0.7);
   final softApplyThreshold =
@@ -525,6 +546,11 @@ class PlayerSyncEngine {
   num lastUserGestureAt = 0;
   num lastForcedPauseAt = 0;
   num _programmaticApplyUntil = 0;
+
+  /// 当前程序化施加窗口的*开始*时刻(runtime-state.ts: programmaticApplyAt)。
+  /// 施加远端状态会触发与用户操作相同的回流事件,要把自己的回声和真实交互
+  /// 分开就得知道窗口起点:只有窗口开始之后发生的手势才可能属于用户。
+  num _programmaticApplyAt = 0;
   PlaybackPlayState? _programmaticApplyPlayState;
 
   /// 已下发但尚未在播放器上落地的程序化 seek 目标(秒)。非空期间
@@ -579,6 +605,11 @@ class PlayerSyncEngine {
   bool _softApplyArmCooldown = false;
   bool _softApplyConvergeByTime = false;
   num _softApplyDeadline = 0;
+
+  /// 会话开始(即 [_softApplyTargetTime] 被采样)的时刻。对端播放头会从
+  /// 那个快照继续前进,所以拿实时远端位置去比时,必须先按已过墙钟时间把
+  /// 快照外推(soft-apply-controller.ts: activeSoftApply.startedAt)。
+  num _softApplyStartedAt = 0;
   void Function()? _cancelSoftApplyTimer;
   String? _softApplyCooldownUrl;
   num _softApplyCooldownUntil = 0;
@@ -1048,6 +1079,7 @@ class PlayerSyncEngine {
         programmaticSeekSettleToleranceSeconds) {
       _clearPendingProgrammaticSeek();
       _programmaticApplyUntil = 0;
+      _programmaticApplyAt = 0;
       return false;
     }
     return true;
@@ -1062,6 +1094,7 @@ class PlayerSyncEngine {
     final url = currentVideo?.normalizedUrl;
     final decision = shouldSuppressProgrammaticEvent(
       programmaticApplyUntil: _programmaticApplyUntil,
+      programmaticApplyAt: _programmaticApplyAt,
       programmaticApplySignature: _programmaticApplySignature,
       normalizedCurrentUrl: url,
       playState: snapshot.playState,
@@ -1517,6 +1550,11 @@ class PlayerSyncEngine {
         playState: playback.playState,
       ),
       playbackRate: playback.playbackRate,
+      // 追平进行中收敛到零,而不是一跌回启动它的门限就停(见
+      // [_isActiveRateOnlyCatchUp])。
+      hasActiveCatchUp: _isActiveRateOnlyCatchUp(
+        normalizeBilibiliUrl(playback.url),
+      ),
     );
     _log(
       'Reconcile mode=${reconcile.mode.name} '
@@ -1675,6 +1713,7 @@ class PlayerSyncEngine {
     // rateOnly 按经过时间恢复,softApply 按追到目标收敛(见 _maintainSoftApply)
     _softApplyConvergeByTime = !isRealSoftApply;
     _softApplyAppliedRate = appliedRate;
+    _softApplyStartedAt = _nowMs();
     _softApplyDeadline = _nowMs() + restoreDelayMs;
     _cancelSoftApplyTimer = _scheduleDelayed(
       Duration(milliseconds: restoreDelayMs),
@@ -1692,6 +1731,17 @@ class PlayerSyncEngine {
   }
 
   bool get _hasActiveSoftApply => _softApplyUrl != null;
+
+  /// 该 url 上是否有一个纯 rateOnly 追平在跑(soft-apply-controller.ts:
+  /// isActiveRateOnlyCatchUp)。用于让 reconcile 收敛到零而不是一跌回启动
+  /// 门限就停。真 softApply 会话(armCooldown sticky)排除在外:它写过进度,
+  /// 延迟的 seek 回声仍需被抑制。
+  bool _isActiveRateOnlyCatchUp(String? url) =>
+      _hasActiveSoftApply &&
+      _softApplyConvergeByTime &&
+      !_softApplyArmCooldown &&
+      url != null &&
+      url == _softApplyUrl;
 
   /// 结束会话:把倍速调回基准,必要时上冷却
   /// (soft-apply-controller.ts: cancelActiveSoftApply)。
@@ -1711,6 +1761,7 @@ class PlayerSyncEngine {
     _softApplyArmCooldown = false;
     _softApplyConvergeByTime = false;
     _softApplyAppliedRate = null;
+    _softApplyStartedAt = 0;
     _softApplyDeadline = 0;
 
     // 只有播放器上仍是我们写下去的追平倍速时才恢复:对不上说明期间
@@ -1782,7 +1833,17 @@ class PlayerSyncEngine {
         (playback.playbackRate - _softApplyRestoreRate!).abs() > 0.01) {
       return 'rate-changed';
     }
-    if ((playback.currentTime - _softApplyTargetTime!).abs() >
+    // _softApplyTargetTime 是会话开始时采样的远端播放头,但对端还在继续播。
+    // 拿实时远端位置去比冻结的快照,只要过了几秒(对端稳定 1x 播、每约 2s
+    // 发一次心跳时必然发生),每次例行心跳都会越界报 target-shifted,追平
+    // 总在收敛前被杀掉、留下残余漂移。按已过墙钟时间把快照外推,让它只对
+    // 真正的无预告跳转触发(有预告的由上面 explicit-seek 拦截,停/暂停的
+    // 对端由 play-state-changed 拦截)。
+    final elapsedSeconds =
+        (_nowMs() - _softApplyStartedAt).clamp(0, double.infinity) / 1000;
+    final expectedTargetTime =
+        _softApplyTargetTime! + elapsedSeconds * (_softApplyRestoreRate ?? 1);
+    if ((playback.currentTime - expectedTargetTime).abs() >
         softApplyTargetShiftCancelThresholdSeconds) {
       return 'target-shifted';
     }
@@ -1830,6 +1891,9 @@ class PlayerSyncEngine {
     if (signature != null) {
       _programmaticApplySignature = signature;
     }
+    // 窗口起点记在本次施加开始的一刻(finally 只顺延 until,不改起点):
+    // 施加过程中或之后发生的用户手势才算真正接管,窗口开始前的手势是陈旧的。
+    _programmaticApplyAt = _nowMs();
     _programmaticApplyUntil = _nowMs() + programmaticApplyWindowMs;
     // 施加期间不做到位判定:目标先记下,窗口在 apply 返回后才开始计时
     _clearPendingProgrammaticSeek();

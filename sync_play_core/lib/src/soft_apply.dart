@@ -14,7 +14,12 @@ library;
 // ---- player-binding.ts ----
 const double softApplyStepSeconds = 0.22;
 const double softApplyMaxStepSeconds = 0.4;
-const double softApplyRateOffset = 0.12;
+
+/// 基准 1x 下追平可用的峰值倍速偏移(即最高 1.16x)。远端播放头按基准速率
+/// 前进,所以这个偏移*就是*相对追平速度:0.16 时一次 drift 需 drift/0.16 秒
+/// 消化。取值克制以让音调变化几乎不可感,但足以让连播换片交接与稳态漂移
+/// 在几秒内收敛,而非十几秒(player-binding.ts: SOFT_APPLY_RATE_OFFSET)。
+const double softApplyRateOffset = 0.16;
 
 // ---- soft-apply-controller.ts ----
 
@@ -68,8 +73,11 @@ double rateAdjustedPlaybackRate({
 }) {
   final tuning = playbackAdjustmentTuning(basePlaybackRate);
   final drift = targetTime - localCurrentTime;
+  // 比例增益:|drift| 超过 rateOffsetLimit/0.3(基准 1x 时约 0.53s)后倍速就
+  // 顶到峰值并在纠正的大部分时间里维持,原先主导收敛时长的渐进尾部因此在
+  // 更久之后才向零衰减(player-binding.ts: drift*0.3)。
   final rateOffset = _clamp(
-    drift * 0.18,
+    drift * 0.3,
     -tuning.rateOffsetLimit,
     tuning.rateOffsetLimit,
   );

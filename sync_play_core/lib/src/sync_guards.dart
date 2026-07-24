@@ -237,6 +237,7 @@ bool hasRecentRemoteStopIntent({
 /// 那是真实意图,不能当回声吞掉。
 ({bool shouldSuppress, bool clearWindow}) shouldSuppressProgrammaticEvent({
   required num programmaticApplyUntil,
+  required num programmaticApplyAt,
   required ProgrammaticPlaybackSignature? programmaticApplySignature,
   required String? normalizedCurrentUrl,
   required PlaybackPlayState playState,
@@ -251,11 +252,15 @@ bool hasRecentRemoteStopIntent({
   if (signature == null || now >= programmaticApplyUntil) {
     return (shouldSuppress: false, clearWindow: true);
   }
-  // 窗口内的用户手势优先:它不是回声
+  // 窗口内的用户手势优先:它不是回声。但仅限窗口开始之后发生的手势——
+  // 窗口开始之前记下的动作(例如用户在远端状态到达前片刻拖过进度条)不能
+  // 作为窗口内事件的证据,否则施加自身的 seeking/play 回声会借这条陈旧记录
+  // 通过放行,被原样广播回房间。
   final matched = explicitActionForEventSource(eventSource);
   if (matched != null &&
       lastExplicitUserAction != null &&
       lastExplicitUserAction.kind == matched &&
+      lastExplicitUserAction.at >= programmaticApplyAt &&
       now - lastExplicitUserAction.at < gestureGraceMs) {
     return (shouldSuppress: false, clearWindow: true);
   }

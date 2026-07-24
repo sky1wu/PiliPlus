@@ -8,46 +8,46 @@ import 'package:test/test.dart';
 void main() {
   group('rateAdjustedPlaybackRate', () {
     test('nudges up when behind, down when ahead, proportional to drift', () {
-      // drift=0.6 → offset=0.6*0.18=0.108,未触顶
+      // drift=0.4 → offset=0.4*0.30=0.12,未触顶(rate=1 上限 0.16)
       expect(
         rateAdjustedPlaybackRate(
           localCurrentTime: 10,
-          targetTime: 10.6,
+          targetTime: 10.4,
           basePlaybackRate: 1,
         ),
-        closeTo(1.108, 0.0001),
+        closeTo(1.12, 0.0001),
       );
       expect(
         rateAdjustedPlaybackRate(
-          localCurrentTime: 10.6,
+          localCurrentTime: 10.4,
           targetTime: 10,
           basePlaybackRate: 1,
         ),
-        closeTo(0.892, 0.0001),
+        closeTo(0.88, 0.0001),
       );
     });
 
     test('offset is capped so catch-up never becomes a jump', () {
-      // rate=1 时上限 0.12;drift=5 会让原始 offset 达 0.9
+      // rate=1 时上限 0.16;drift=5 会让原始 offset 达 1.5
       expect(
         rateAdjustedPlaybackRate(
           localCurrentTime: 10,
           targetTime: 15,
           basePlaybackRate: 1,
         ),
-        closeTo(1.12, 0.0001),
+        closeTo(1.16, 0.0001),
       );
     });
 
     test('cap widens with the base rate', () {
-      // rate=2 时上限 min(0.26, 0.12+1*0.1)=0.22
+      // rate=2 时上限 min(0.26, 0.16+1*0.1)=0.26
       expect(
         rateAdjustedPlaybackRate(
           localCurrentTime: 10,
           targetTime: 15,
           basePlaybackRate: 2,
         ),
-        closeTo(2.22, 0.0001),
+        closeTo(2.26, 0.0001),
       );
     });
   });
@@ -61,8 +61,8 @@ void main() {
         basePlaybackRate: 1,
       );
       expect(applied.currentTime, closeTo(10.4, 0.0001));
-      // 倍速偏移仍被 ±0.12 夹住(rate=1 时的上限)
-      expect(applied.playbackRate, closeTo(1.12, 0.0001));
+      // 倍速偏移被 ±0.16 夹住(rate=1 时的上限):drift=1.0*0.30=0.3 触顶
+      expect(applied.playbackRate, closeTo(1.16, 0.0001));
     });
 
     test('a small drift still moves by the step floor, not all at once', () {
@@ -73,7 +73,8 @@ void main() {
         basePlaybackRate: 1,
       );
       expect(applied.currentTime, closeTo(10.22, 0.0001));
-      expect(applied.playbackRate, closeTo(1.054, 0.0001));
+      // 倍速偏移=0.3*0.30=0.09,未触顶
+      expect(applied.playbackRate, closeTo(1.09, 0.0001));
     });
 
     test('steps backwards when ahead of the target', () {
@@ -83,7 +84,8 @@ void main() {
         basePlaybackRate: 1,
       );
       expect(applied.currentTime, closeTo(10.6, 0.0001));
-      expect(applied.playbackRate, closeTo(0.88, 0.0001));
+      // drift=-1.0*0.30=-0.3 触顶到 -0.16 → 0.84
+      expect(applied.playbackRate, closeTo(0.84, 0.0001));
     });
   });
 
