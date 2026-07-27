@@ -63,7 +63,14 @@ class SyncPlayService extends ChangeNotifier {
 
   // 房间事件 toast 的 diff 基线(对应扩展端 ToastCoordinatorState)
   RoomState? _lastToastRoomState;
+
+  /// [_lastToastRoomState] 到达时的单调时刻。
+  double? _lastToastRoomStateAtMs;
   Map<String, num> _lastSeekToastByActor = {};
+
+  /// toast 计时用的单调时钟(对应扩展端 content script 的 performance.now()):
+  /// 下游每个判定都是在本机量出的间隔,任何一个都不该随系统时间调整而移动。
+  final Stopwatch _toastClock = Stopwatch()..start();
 
   bool get inRoom => session.roomCode != null;
 
@@ -103,6 +110,7 @@ class SyncPlayService extends ChangeNotifier {
     final normalizedSharedUrl = sharedVideo == null
         ? null
         : normalizeBilibiliUrl(sharedVideo.url);
+    final nowMs = _toastClock.elapsedMicroseconds / 1000;
     final plan = buildRoomStateToastPlan(
       previousState: _lastToastRoomState,
       nextState: state,
@@ -111,10 +119,14 @@ class SyncPlayService extends ChangeNotifier {
       isCurrentPageShowingSharedVideo:
           normalizedSharedUrl != null &&
           engine.currentVideo?.normalizedUrl == normalizedSharedUrl,
-      now: DateTime.now().millisecondsSinceEpoch,
+      now: nowMs,
+      elapsedSincePreviousStateMs: _lastToastRoomStateAtMs == null
+          ? 0
+          : nowMs - _lastToastRoomStateAtMs!,
       lastSeekToastByActor: _lastSeekToastByActor,
     );
     _lastToastRoomState = state;
+    _lastToastRoomStateAtMs = nowMs;
     _lastSeekToastByActor = plan.nextSeekToastByActor;
 
     engine.applyRoomState(state);
@@ -126,6 +138,7 @@ class SyncPlayService extends ChangeNotifier {
 
   void _resetToastState() {
     _lastToastRoomState = null;
+    _lastToastRoomStateAtMs = null;
     _lastSeekToastByActor = {};
   }
 

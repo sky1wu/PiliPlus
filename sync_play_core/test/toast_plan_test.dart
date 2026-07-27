@@ -56,6 +56,9 @@ RoomToastPlan plan({
   bool pendingRoomStateHydration = false,
   bool isCurrentPageShowingSharedVideo = true,
   num now = 100000,
+  // 默认与各用例的 serverTime 间隔一致(2s):两个时间参考不冲突,跳转判定只取决
+  // 于进度增量本身。
+  double elapsedSincePreviousStateMs = 2000,
   Map<String, num> lastSeekToastByActor = const {},
 }) => buildRoomStateToastPlan(
   previousState: previousState,
@@ -64,6 +67,7 @@ RoomToastPlan plan({
   pendingRoomStateHydration: pendingRoomStateHydration,
   isCurrentPageShowingSharedVideo: isCurrentPageShowingSharedVideo,
   now: now,
+  elapsedSincePreviousStateMs: elapsedSincePreviousStateMs,
   lastSeekToastByActor: lastSeekToastByActor,
 );
 
@@ -76,6 +80,7 @@ void main() {
         shouldShowSeekToast(
           previous,
           playback(currentTime: 32, serverTime: 3000, seq: 2),
+          2000,
         ),
         isFalse,
       );
@@ -84,6 +89,43 @@ void main() {
         shouldShowSeekToast(
           previous,
           playback(currentTime: 40, serverTime: 3000, seq: 2),
+          2000,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a server clock step alone is not a seek', () {
+      // 上报的误报形态:对端稳稳播了 2.1s,期间服务端的钟被步进约 1.9s,于是它的
+      // 时刻宣称过了 4s。没有人拖进度。
+      expect(
+        shouldShowSeekToast(
+          playback(currentTime: 10, serverTime: 1000),
+          playback(currentTime: 12.1, serverTime: 5000, seq: 2),
+          2100,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a local stall alone is not a seek', () {
+      // 镜像情形:主线程卡顿后两份状态背靠背处理完,本地看起来没过时间。
+      expect(
+        shouldShowSeekToast(
+          playback(currentTime: 10, serverTime: 1000),
+          playback(currentTime: 12.1, serverTime: 3100, seq: 2),
+          0,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a real seek moves against both references', () {
+      expect(
+        shouldShowSeekToast(
+          playback(currentTime: 10, serverTime: 1000),
+          playback(currentTime: 42, serverTime: 3000, seq: 2),
+          2000,
         ),
         isTrue,
       );
@@ -102,6 +144,7 @@ void main() {
             playState: PlaybackPlayState.paused,
             serverTime: 3000,
           ),
+          2000,
         ),
         isFalse,
       );
@@ -113,8 +156,26 @@ void main() {
             playState: PlaybackPlayState.paused,
             serverTime: 3000,
           ),
+          2000,
         ),
         isTrue,
+      );
+    });
+
+    test('resuming after a long pause is not a backwards jump', () {
+      // 位置在 30s 暂停期间没变:这里若把流逝时间算进去,会把暂停本身报成一次
+      // 30s 的倒退。
+      expect(
+        shouldShowSeekToast(
+          playback(
+            currentTime: 10,
+            playState: PlaybackPlayState.paused,
+            serverTime: 1000,
+          ),
+          playback(currentTime: 10, serverTime: 31000, seq: 2),
+          30000,
+        ),
+        isFalse,
       );
     });
   });

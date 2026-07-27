@@ -12,6 +12,8 @@
 ///   专用状态机,App 的自动跟进分享无法区分连播与手动切页,v1 不做。
 library;
 
+import 'dart:math' as math;
+
 import 'common.dart';
 import 'models.dart';
 
@@ -87,25 +89,45 @@ String? _memberName(RoomState state, String? memberId) {
   return null;
 }
 
-/// content/toast.ts: shouldShowSeekToast——按两拍 serverTime 差推算期望
-/// 进度增量,实际增量偏离超过阈值才认定为一次"跳转"。
-bool shouldShowSeekToast(PlaybackState previous, PlaybackState next) {
+/// content/toast.ts: shouldShowSeekToast——房间位置的移动是否超出"照着播"能解释
+/// 的范围,即有人拖了进度条。
+///
+/// 进度增量要与**两个独立的**流逝时间参考对照,两者都超阈值才算跳转,因为它们各
+/// 有各的说谎方式:
+///
+/// - serverTime 差不受本机任何事情影响,但它由服务端墙钟打戳。服务端的钟被步进
+///   (容器/虚拟机重同步——实测某 WSL 开发服务端两次 ping 之间跳了约 1.9s)会报出
+///   一段根本没发生过的间隔,差值就在这里变成幻影跳转。
+/// - 本地量到的两拍到达间隔不受任何钟调整影响,但扛不住本端被饿着:主线程卡顿后
+///   两份状态背靠背处理完,看起来像没过时间,读作房间向前跳了。
+///
+/// 真实的跳转对**两个**参考都成立,所以要求两者都超阈值即可同时消掉这两类误报。
+/// 代价是真跳转恰好撞上钟步进或卡顿时会漏一次提示——只是观感问题,下一次更新照样
+/// 把事情说清楚。误报更糟:它说某位成员做了他没做的事。
+bool shouldShowSeekToast(
+  PlaybackState previous,
+  PlaybackState next,
+  double localElapsedMs,
+) {
   final actualDelta = next.currentTime - previous.currentTime;
-  final elapsedMs = next.serverTime - previous.serverTime;
-  final elapsedSeconds = (elapsedMs > 0 ? elapsedMs : 0) / 1000;
-  final expectedDelta = elapsedSeconds * previous.playbackRate;
+  final serverElapsedMs = next.serverTime - previous.serverTime;
+  final serverElapsedSeconds =
+      (serverElapsedMs > 0 ? serverElapsedMs : 0) / 1000;
+  final localElapsedSeconds = (localElapsedMs > 0 ? localElapsedMs : 0) / 1000;
+  double unexplainedBy(double elapsedSeconds) =>
+      (actualDelta - elapsedSeconds * previous.playbackRate).abs();
 
-  if (previous.playState == PlaybackPlayState.playing &&
-      next.playState != PlaybackPlayState.playing) {
-    return (actualDelta - expectedDelta).abs() >= seekToastThresholdSeconds;
-  }
-
-  if (previous.playState != PlaybackPlayState.playing ||
-      next.playState != PlaybackPlayState.playing) {
+  if (previous.playState != PlaybackPlayState.playing) {
+    // 房间当时没在走,任何流逝时间都解释不了位移:此后位置有变就是有人拖了。这条
+    // 也覆盖从暂停恢复的情形——那里把流逝时间算进去会把暂停区间报成一次倒退。
     return actualDelta.abs() >= seekToastThresholdSeconds;
   }
 
-  return (actualDelta - expectedDelta).abs() >= seekToastThresholdSeconds;
+  return math.min(
+        unexplainedBy(serverElapsedSeconds),
+        unexplainedBy(localElapsedSeconds),
+      ) >=
+      seekToastThresholdSeconds;
 }
 
 /// content/toast.ts: getRoomStateToastMessages(+ 折叠的共享视频切换提示)。
@@ -115,7 +137,14 @@ RoomToastPlan buildRoomStateToastPlan({
   required String? localMemberId,
   required bool pendingRoomStateHydration,
   required bool isCurrentPageShowingSharedVideo,
+
+  /// 单调 now,也是 [lastSeekToastByActor] 里时间戳所在的钟。用单调时钟,钟被调整
+  /// 时既不会撑大也不会压扁跳转判定与抑制窗口。
   required num now,
+
+  /// previousState 与 nextState 两次到达之间在本地量到的间隔,与 [now] 同一单调
+  /// 时钟。见 [shouldShowSeekToast]。
+  required double elapsedSincePreviousStateMs,
   required Map<String, num> lastSeekToastByActor,
 }) {
   final events = <RoomToastEvent>[];
@@ -177,7 +206,11 @@ RoomToastPlan buildRoomStateToastPlan({
       nextPlayback != null &&
       previousState.sharedVideo?.url == nextState.sharedVideo?.url &&
       nextPlayback.actorId != localMemberId &&
-      shouldShowSeekToast(previousPlayback, nextPlayback);
+      shouldShowSeekToast(
+        previousPlayback,
+        nextPlayback,
+        elapsedSincePreviousStateMs,
+      );
 
   if (previousPlayback?.playState != nextPlayback?.playState &&
       nextPlayback != null &&

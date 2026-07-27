@@ -66,8 +66,12 @@ class Harness {
       onRoomState: appliedStates.add,
       onSessionEnded: endedReasons.add,
       onServerError: serverErrors.add,
+      monotonicNowMs: () => monotonicNowMs,
     );
   }
+
+  /// 受控的单调时钟(生产中为 Stopwatch,见 session.dart)。
+  double monotonicNowMs = 0;
 
   late final SyncPlayRoomSession session;
   final transports = <FakeTransport>[];
@@ -123,6 +127,33 @@ Map<String, Object?> roomStateMessage({List<Map<String, Object?>>? members}) =>
             ],
       },
     };
+
+Map<String, Object?> playingRoomStateMessage({
+  double currentTime = 42,
+  num serverTime = 1000,
+  num? playbackAgeMs,
+}) => {
+  'type': 'room:state',
+  'payload': {
+    'roomCode': 'ABC123',
+    'sharedVideo': null,
+    'playback': {
+      'url': 'https://www.bilibili.com/video/BV1xx411c7mD',
+      'currentTime': currentTime,
+      'playState': 'playing',
+      'playbackRate': 1,
+      'updatedAt': serverTime,
+      'serverTime': serverTime,
+      'actorId': 'member-2',
+      'seq': 7,
+    },
+    'members': [
+      {'id': 'member-1', 'name': 'Alice'},
+      {'id': 'member-2', 'name': 'Bob'},
+    ],
+    if (playbackAgeMs != null) 'playbackAgeMs': playbackAgeMs,
+  },
+};
 
 void main() {
   test('getReconnectDelay backs off exponentially and caps at 30s', () {
@@ -560,6 +591,110 @@ void main() {
       expect(harness.session.roomCode, isNull);
       expect(harness.session.connected, isFalse);
       harness.session.dispose();
+    });
+  });
+
+  group('播放锚点', () {
+    test('a fresh playing snapshot is applied as the sender reported it', () {
+      fakeAsync((async) {
+        final harness = Harness();
+        harness.establishCreatedRoom(async);
+        harness.monotonicNowMs = 10000;
+        harness.transport.emit(playingRoomStateMessage());
+        async.flushMicrotasks();
+
+        expect(harness.appliedStates.last.playback!.currentTime, 42);
+        harness.session.dispose();
+      });
+    });
+
+    test('a reported snapshot age is credited on arrival', () {
+      fakeAsync((async) {
+        final harness = Harness();
+        harness.establishCreatedRoom(async);
+        // 中途加入:服务端交来的快照在下发时已旧了 2s。
+        harness.monotonicNowMs = 10000;
+        harness.transport.emit(playingRoomStateMessage(playbackAgeMs: 2000));
+        async.flushMicrotasks();
+
+        expect(
+          harness.appliedStates.last.playback!.currentTime,
+          closeTo(44, 1e-9),
+        );
+
+        // 之后的读取继续从同一个锚点外推,而不是从施加那一刻。
+        harness.monotonicNowMs = 13000;
+        expect(
+          harness.session.compensatedRoomState!.playback!.currentTime,
+          closeTo(47, 1e-9),
+        );
+        harness.session.dispose();
+      });
+    });
+
+    test('an implausible age falls back to anchoring at arrival', () {
+      fakeAsync((async) {
+        final harness = Harness();
+        harness.establishCreatedRoom(async);
+        harness.monotonicNowMs = 60000;
+        harness.transport.emit(
+          playingRoomStateMessage(playbackAgeMs: maxTrustedPlaybackAgeMs + 1),
+        );
+        async.flushMicrotasks();
+
+        expect(harness.appliedStates.last.playback!.currentTime, 42);
+        harness.session.dispose();
+      });
+    });
+
+    test('serverTime alone never moves the applied position', () {
+      // #210 的判据:同一份快照只把服务端打戳往前挪一大截(钟步进),施加的位置
+      // 必须不变。
+      double appliedWith(num serverTime) {
+        late double applied;
+        fakeAsync((async) {
+          final harness = Harness();
+          harness.establishCreatedRoom(async);
+          harness.monotonicNowMs = 10000;
+          harness.transport.emit(
+            playingRoomStateMessage(serverTime: serverTime),
+          );
+          async.flushMicrotasks();
+          applied = harness.appliedStates.last.playback!.currentTime;
+          harness.session.dispose();
+        });
+        return applied;
+      }
+
+      expect(appliedWith(1000), appliedWith(1000 + 900000));
+    });
+
+    test('member deltas do not re-anchor the snapshot they carry', () {
+      fakeAsync((async) {
+        final harness = Harness();
+        harness.establishCreatedRoom(async);
+        harness.monotonicNowMs = 10000;
+        harness.transport.emit(playingRoomStateMessage());
+        async.flushMicrotasks();
+
+        harness.monotonicNowMs = 13000;
+        harness.transport.emit({
+          'type': 'room:member-joined',
+          'payload': {
+            'roomCode': 'ABC123',
+            'member': {'id': 'member-3', 'name': 'Carol'},
+          },
+        });
+        async.flushMicrotasks();
+
+        // 成员增量携带的是已到达的那份快照:位置按其到达以来真正流逝的 3s 前进,
+        // 而不是重新从 0 开始。
+        expect(
+          harness.appliedStates.last.playback!.currentTime,
+          closeTo(45, 1e-9),
+        );
+        harness.session.dispose();
+      });
     });
   });
 }

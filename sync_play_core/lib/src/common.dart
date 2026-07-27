@@ -2,7 +2,7 @@
 library;
 
 /// 协议版本(packages/protocol: PROTOCOL_VERSION)。
-const int syncPlayProtocolVersion = 3;
+const int syncPlayProtocolVersion = 4;
 
 /// 播放状态(wire 值与 TS 端字面量一致)。
 enum PlaybackPlayState {

@@ -36,6 +36,7 @@ Map<String, Object?> _roomStateMessage({
   Object? sharedVideo,
   Object? playback,
   Object? members,
+  Object? playbackAgeMs,
 }) => {
   'type': 'room:state',
   'payload': {
@@ -47,6 +48,7 @@ Map<String, Object?> _roomStateMessage({
         [
           {'id': 'member-1', 'name': 'Alice'},
         ],
+    if (playbackAgeMs != null) 'playbackAgeMs': playbackAgeMs,
   },
 };
 
@@ -86,6 +88,45 @@ void main() {
     expect(state.playback!.syncIntent, PlaybackSyncIntent.explicitSeek);
     expect(state.members, hasLength(1));
     expect(state.members.single.name, 'Alice');
+    // 旧服务端不带 playbackAgeMs。
+    expect(message.playbackAgeMs, isNull);
+  });
+
+  test('accepts room:state carrying a non-negative playback age', () {
+    final message = SyncPlayServerMessage.tryParse(
+      _roomStateMessage(playback: _playback(const {}), playbackAgeMs: 2100),
+    );
+    expect((message as RoomStateMessage).playbackAgeMs, 2100);
+
+    final zero = SyncPlayServerMessage.tryParse(
+      _roomStateMessage(playback: _playback(const {}), playbackAgeMs: 0),
+    );
+    expect((zero as RoomStateMessage).playbackAgeMs, 0);
+  });
+
+  test('rejects room:state whose playback age is negative or non-finite', () {
+    // 负年龄不是时长;在守卫处拒掉,接收端就不必定义"快照来自未来"是什么意思。
+    expect(
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(playback: _playback(const {}), playbackAgeMs: -1),
+      ),
+      isNull,
+    );
+    expect(
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(
+          playback: _playback(const {}),
+          playbackAgeMs: double.nan,
+        ),
+      ),
+      isNull,
+    );
+    expect(
+      SyncPlayServerMessage.tryParse(
+        _roomStateMessage(playback: _playback(const {}), playbackAgeMs: 'soon'),
+      ),
+      isNull,
+    );
   });
 
   test('accepts room:state when member ids use UUIDs', () {

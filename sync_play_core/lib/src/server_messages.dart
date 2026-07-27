@@ -84,12 +84,21 @@ sealed class SyncPlayServerMessage {
     );
   }
 
+  /// guards/server-message.ts: isRoomStatePayload——房间状态本体之外,可选携带
+  /// 服务端下发时该播放快照已有的年龄。
   static RoomStateMessage? _parseRoomState(Map<String, Object?> map) {
     final state = RoomState.tryParse(map['payload']);
     if (state == null) {
       return null;
     }
-    return RoomStateMessage(state: state);
+    final payload = asRecord(map['payload']);
+    final playbackAgeMs = payload?['playbackAgeMs'];
+    // 负年龄不是时长;在这里拒掉,接收端就不必去定义"快照来自未来"是什么意思。
+    if (playbackAgeMs != null &&
+        !(isFiniteNumber(playbackAgeMs) && (playbackAgeMs as num) >= 0)) {
+      return null;
+    }
+    return RoomStateMessage(state: state, playbackAgeMs: playbackAgeMs as num?);
   }
 
   static SyncPlayServerMessage? _parseMemberDelta(
@@ -169,10 +178,25 @@ final class RoomJoinedMessage extends SyncPlayServerMessage {
   final int? serverProtocolVersion;
 }
 
+/// types/server-message.ts: RoomStateMessage / RoomStatePayload
 final class RoomStateMessage extends SyncPlayServerMessage {
-  const RoomStateMessage({required this.state});
+  const RoomStateMessage({required this.state, this.playbackAgeMs});
 
   final RoomState state;
+
+  /// 服务端下发这一刻,其播放快照已有多旧(毫秒时长)。
+  ///
+  /// 它挂在消息上而不是 [RoomState] 里,也刻意是**时长**而非时刻:
+  ///
+  /// - 时长跨两台不同步的钟仍然安全——接收端只会把它加到自己的锚点上;时刻不安全,
+  ///   拿服务端时刻减本地时刻量到的是钟差,而钟差不是时长且会自己漂。
+  /// - 年龄只在发送那一刻为真,因此必须每次下发重算、绝不能存进房间状态。把它挡在
+  ///   [PlaybackState] 之外(那是会被服务端持久化、也会被客户端在 playback:update
+  ///   里回传的形状),让"存下来"在结构上不可能,而不是靠人记住的一条规矩。
+  ///
+  /// 为兼容旧服务端而可选;缺失时接收端按 0 处理(#212 之前的行为:认为刚到达的
+  /// 快照就是当前的)。
+  final num? playbackAgeMs;
 }
 
 final class RoomMemberJoinedMessage extends SyncPlayServerMessage {

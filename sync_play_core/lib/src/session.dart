@@ -14,6 +14,7 @@ import 'client_messages.dart';
 import 'clock_sync.dart';
 import 'common.dart';
 import 'models.dart';
+import 'playback_anchor.dart';
 import 'player_sync.dart' show PlayerSyncSessionApi;
 import 'server_messages.dart';
 import 'transport.dart';
@@ -64,6 +65,12 @@ Uri? validateServerUrl(String url) {
 
 typedef _MemberDelta = ({bool joined, String roomCode, RoomMember member});
 
+/// 进程级单调时钟(对应扩展端 performance.now())。Stopwatch 走的是不受
+/// 系统时间调整影响的时基,正是播放锚点需要的。
+final Stopwatch _processClock = Stopwatch()..start();
+
+double _processMonotonicNowMs() => _processClock.elapsedMicroseconds / 1000;
+
 class SyncPlayRoomSession implements PlayerSyncSessionApi {
   SyncPlayRoomSession({
     required this.serverUrl,
@@ -75,10 +82,21 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     this.onSessionEnded,
     this.onServerError,
     this.log,
-  }) : _connector = connector ?? WebSocketSyncPlayTransport.connect;
+    double Function()? monotonicNowMs,
+  }) : _connector = connector ?? WebSocketSyncPlayTransport.connect,
+       _monotonicNowMs = monotonicNowMs ?? _processMonotonicNowMs;
 
   String serverUrl;
   final SyncPlayTransportConnector _connector;
+
+  /// 播放计时用的单调时间源(浏览器端为 performance.now())。绝不能换成墙钟:
+  /// 锚点的意义就是不随钟调整移动。
+  final double Function() _monotonicNowMs;
+
+  /// clock-controller.ts 的锚点部分,持有"当前外推的快照何时为真"。
+  late final PlaybackAnchorTracker _playbackAnchor = PlaybackAnchorTracker(
+    _monotonicNowMs,
+  );
 
   /// room-session-controller.ts: DEFAULT_BOOTSTRAP_ROOM_STATE_TIMEOUT_MS
   final Duration bootstrapRoomStateTimeout;
@@ -130,9 +148,14 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
   bool awaitingFreshRoomState = false;
 
   // ---- 时钟(runtime-state.ts: ClockState) ----
+  /// 已发布的时钟偏移。**仅用于诊断与 UI 展示**,不参与播放路径:位置外推以
+  /// 本地单调锚点为准(见 clock_sync.dart 的 extrapolatePlayingRoomState)。
   double? clockOffsetMs;
   @override
   double? rttMs;
+
+  /// 支撑稳健偏移估计的最近若干次 ping 样本,最旧在前。
+  List<ClockSample> clockSamples = const [];
   Timer? _clockTimer;
 
   // ---- bootstrap 期 member 增量排队(room-session-controller.ts) ----
@@ -155,13 +178,14 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     return remaining.isNegative ? Duration.zero : remaining;
   }
 
-  /// 按时钟偏移外推后的房间状态(clock-controller.ts: compensateRoomState)。
+  /// 按本地单调锚点外推到此刻的房间状态(clock-controller.ts:
+  /// compensateRoomState)。快照到达时已锚定,这里不再传锚点。
   RoomState? get compensatedRoomState {
     final state = roomState;
     if (state == null) {
       return null;
     }
-    return compensateRoomStateForClock(state, clockOffsetMs);
+    return _playbackAnchor.compensateRoomState(state);
   }
 
   void _notify() => onChanged?.call();
@@ -360,23 +384,35 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
   }
 
   void _handleSyncPong(SyncPongMessage pong) {
-    final sample = updateClockSample(
+    final result = updateClockSample(
       clientSendTime: pong.clientSendTime,
       serverReceiveTime: pong.serverReceiveTime,
       serverSendTime: pong.serverSendTime,
       now: DateTime.now().millisecondsSinceEpoch,
       previousRttMs: rttMs,
       previousClockOffsetMs: clockOffsetMs,
+      previousSamples: clockSamples,
     );
-    rttMs = sample.rttMs;
-    clockOffsetMs = sample.clockOffsetMs;
-    _log('Clock sync offset=${clockOffsetMs}ms rtt=${rttMs}ms');
+    rttMs = result.rttMs;
+    clockOffsetMs = result.clockOffsetMs;
+    clockSamples = result.samples;
+    // 原始样本与已发布的估计一起记:往返时延平稳而样本却在游走,正是某个时刻打戳
+    // 偏晚的特征,out/in 指出是哪个方向。
+    _log(
+      'Clock sync offset=${clockOffsetMs}ms rtt=${rttMs}ms '
+      'sample=${result.sample.offsetMs.round()}ms '
+      'sampleRtt=${result.sample.rttMs}ms '
+      'out=${result.sample.outboundMs}ms in=${result.sample.inboundMs}ms '
+      'window=${result.samples.length}',
+    );
   }
 
   // ------------------------------------------------------ 服务端消息处理
 
   /// room-session-controller.ts: handleServerMessage
   void _handleServerMessage(SyncPlayServerMessage message) {
+    // 在任何处理之前打戳:这就是消息到达本机的时刻。
+    final receivedAtMs = _monotonicNowMs();
     switch (message) {
       case RoomCreatedMessage():
         _clearPendingMemberDeltas();
@@ -407,7 +443,13 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
         _syncProfileAfterRoomEstablished();
         _notify();
       case RoomStateMessage():
-        _handleRoomStateMessage(message.state);
+        // playbackAgeMs 在入口就被消化掉、不随房间状态往下走:它只在服务端发送
+        // 的那一刻为真,而房间状态会被缓存、会在成员增量里被重包,存着的年龄会被
+        // 当成新鲜的读。
+        _handleRoomStateMessage(
+          message.state,
+          resolvePlaybackAnchorAtMs(receivedAtMs, message.playbackAgeMs),
+        );
       case RoomMemberJoinedMessage():
         _handleMemberDelta((
           joined: true,
@@ -455,6 +497,7 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
       memberToken = null;
       memberId = null;
       roomState = null;
+      _playbackAnchor.reset();
     }
     if (roomCode != null &&
         pendingJoinRoomCode == null &&
@@ -474,14 +517,24 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     _notify();
   }
 
-  void _handleRoomStateMessage(RoomState nextState) {
+  void _handleRoomStateMessage(RoomState nextState, double playbackAnchorAtMs) {
     final resolvedState = _consumePendingMemberDeltas(nextState);
     _stopWaitingForBootstrapRoomState();
+    // 在这份状态可被观察到之前先打锚点:落地之后 UI 就能读到它、成员增量也能把它
+    // 重包一次,谁先补偿谁都必须发现到达时刻已经记好,而不是拿自己那一刻当锚点。
+    _playbackAnchor.markPlaybackArrival(
+      resolvedState.playback,
+      playbackAnchorAtMs,
+    );
     roomState = resolvedState;
     roomCode = resolvedState.roomCode;
     lastError = null;
     onRoomState?.call(
-      compensateRoomStateForClock(resolvedState, clockOffsetMs),
+      // 锚在快照真正为真的那一刻,而不是走到这一行的时刻。
+      _playbackAnchor.compensateRoomState(
+        resolvedState,
+        anchorAtMs: playbackAnchorAtMs,
+      ),
     );
     _notify();
   }
@@ -499,7 +552,9 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     roomState = nextState;
     roomCode = nextState.roomCode;
     lastError = null;
-    onRoomState?.call(compensateRoomStateForClock(nextState, clockOffsetMs));
+    // 不传到达时刻:成员增量携带的是我们已经拿到的那份播放快照,它的锚点在快照
+    // 到达时就立好了。
+    onRoomState?.call(_playbackAnchor.compensateRoomState(nextState));
     _notify();
   }
 
@@ -611,9 +666,8 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     );
     roomState = resolvedState;
     lastError = null;
-    onRoomState?.call(
-      compensateRoomStateForClock(resolvedState, clockOffsetMs),
-    );
+    // 同成员增量路径:排队的增量只改成员表,播放快照与其锚点都是已经到达的那份。
+    onRoomState?.call(_playbackAnchor.compensateRoomState(resolvedState));
     _notify();
   }
 
@@ -683,6 +737,7 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     memberToken = null;
     memberId = null;
     roomState = null;
+    _playbackAnchor.reset();
     pendingJoinRoomCode = null;
     pendingJoinToken = null;
     pendingJoinRequestSent = false;
@@ -715,6 +770,7 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     memberToken = null;
     memberId = null;
     roomState = null;
+    _playbackAnchor.reset();
     lastError = null;
     _notify();
     if (connected) {
@@ -738,6 +794,7 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     memberToken = null;
     memberId = null;
     roomState = null;
+    _playbackAnchor.reset();
     pendingJoinRoomCode = null;
     pendingJoinToken = null;
     pendingJoinRequestSent = false;
@@ -761,6 +818,7 @@ class SyncPlayRoomSession implements PlayerSyncSessionApi {
     memberToken = null;
     memberId = null;
     roomState = null;
+    _playbackAnchor.reset();
     pendingCreateRoom = false;
     pendingJoinRoomCode = null;
     pendingJoinToken = null;
